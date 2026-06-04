@@ -10,7 +10,7 @@ Before substantial work, read:
 
 1. `README.md`
 2. `docs/spec.md`
-3. `docs/OPEN_SOURCE_SCOPE.md`
+3. `docs/open-source-scope.md`
 4. the directly relevant page or module documentation
 
 ## Operating Rules

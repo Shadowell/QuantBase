@@ -15,9 +15,11 @@ def test_signal_center_route_is_registered_but_sidebar_entry_is_hidden():
     assert "const SignalCenter = lazy(() => import('./pages/SignalCenter'))" in app
     assert 'path="signals" element={<SignalCenter />}' in app
     assert "{ path: '/signals', icon: Send, label: '信号' }" not in layout
-    assert layout.index("{ path: '/live-real', icon: Rocket, label: '实盘' }") < layout.index(
-        "{ path: '/watch', icon: ScanLine, label: '盯盘' }"
-    ) < layout.index("{ path: '/monitor', icon: Eye, label: '监控' }") < layout.index(
+    assert "{ path: '/live-real'" not in layout
+    assert "{ path: '/watch'" not in layout
+    assert layout.index("{ path: '/live', icon: Activity, label: '模拟' }") < layout.index(
+        "{ path: '/monitor', icon: Eye, label: '监控' }"
+    ) < layout.index(
         "{ path: '/data', icon: Database, label: '数据' }"
     )
 
@@ -413,9 +415,9 @@ def test_signal_center_page_exposes_manual_approval_and_channel_controls():
 
 def test_okx_signal_bot_json_format_doc_is_available():
     readme = _read("README.md")
-    doc = _read("docs/okx_signal_bot_json_format.md")
+    doc = _read("docs/okx-signal-bot-json-format.md")
 
-    assert "docs/okx_signal_bot_json_format.md" in readme
+    assert "docs/okx-signal-bot-json-format.md" in readme
     assert "OKX Signal Bot 自定义 JSON 格式" in doc
     assert '"action": "ENTER_LONG"' in doc
     assert '"investmentType": "percentage_balance"' in doc

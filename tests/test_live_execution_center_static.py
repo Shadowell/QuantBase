@@ -18,17 +18,18 @@ def test_live_preflight_result_close_blocks_hover_focus_reopen():
     assert "!resultPanelDismissed && 'group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100'" in page
 
 
-def test_live_real_nav_and_route_are_registered():
+def test_live_real_route_is_registered_and_sidebar_entry_is_hidden():
     app = _read("frontend/src/App.tsx")
     layout = _read("frontend/src/components/MainLayout.tsx")
     page = _read("frontend/src/pages/liveTrading/index.tsx")
 
     assert 'path="live-real" element={<LiveTrading modeScope="live" />}' in app
-    live_real_nav = "{ path: '/live-real', icon: Rocket, label: '实盘', allowedRoles: ['admin', 'guest'] }"
-    assert live_real_nav in layout
-    assert layout.index("{ path: '/live', icon: Activity, label: '模拟', allowedRoles: ['admin', 'guest'] }") < layout.index(
-        live_real_nav
-    ) < layout.index("{ path: '/watch', icon: ScanLine, label: '盯盘', allowedRoles: ['admin', 'guest'] }")
+    assert 'path="watch" element={<WatchMarket />}' in app
+    assert "{ path: '/live-real'" not in layout
+    assert "{ path: '/watch'" not in layout
+    assert layout.index("{ path: '/live', icon: Activity, label: '模拟' }") < layout.index(
+        "{ path: '/monitor', icon: Eye, label: '监控' }"
+    )
     assert "import LiveExecutionCenter from './LiveExecutionCenter';" in page
     assert "return <LiveExecutionCenter />;" in page
 

@@ -118,46 +118,6 @@ function unwrapEnvelope(raw: any): any {
   return raw;
 }
 
-export type AuthRole = 'admin' | 'guest' | null;
-
-export interface AuthSession {
-  authEnabled: boolean;
-  authenticated: boolean;
-  role: AuthRole;
-  permissions: string[];
-  expiresAt?: string;
-  sessionId?: string;
-  guestCodeId?: number;
-  maxBacktestsPerDay?: number;
-  maxConcurrentBacktests?: number;
-  maxBacktestDays?: number;
-}
-
-export interface GuestAccessCode {
-  id: number;
-  note: string;
-  expiresAt: string;
-  maxBacktestsPerDay: number;
-  maxConcurrentBacktests: number;
-  maxBacktestDays: number;
-  createdBy?: string;
-  createdAt?: string;
-  lastUsedAt?: string | null;
-  revokedAt?: string | null;
-}
-
-export interface CreatedGuestAccessCode extends GuestAccessCode {
-  code: string;
-}
-
-export interface GuestCodeCreateInput {
-  note?: string;
-  expiresInMinutes?: number;
-  maxBacktestsPerDay?: number;
-  maxConcurrentBacktests?: number;
-  maxBacktestDays?: number;
-}
-
 async function getReq<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
   const normalized = config ? { ...config, params: snakifyDeep(config.params) } : undefined;
   const raw = await api.get(url, normalized);
@@ -181,31 +141,6 @@ async function deleteReq<T>(url: string, config?: AxiosRequestConfig): Promise<T
   const raw = await api.delete(url, normalized);
   return camelizeDeep<T>(unwrapEnvelope(raw));
 }
-
-// ============================================
-// 认证 API
-// ============================================
-
-export const authApi = {
-  me: (): Promise<AuthSession> => getReq('/auth/me'),
-
-  adminLogin: (username: string, password: string): Promise<AuthSession> =>
-    postReq('/auth/admin/login', { username, password }),
-
-  guestLogin: (code: string): Promise<AuthSession> =>
-    postReq('/auth/guest/login', { code }),
-
-  logout: (): Promise<{ loggedOut: boolean }> => postReq('/auth/logout'),
-
-  listGuestCodes: (): Promise<{ items: GuestAccessCode[] }> =>
-    getReq('/auth/guest-codes'),
-
-  createGuestCode: (data: GuestCodeCreateInput): Promise<CreatedGuestAccessCode> =>
-    postReq('/auth/guest-codes', data),
-
-  revokeGuestCode: (codeId: number): Promise<{ id: number; revokedAt: string }> =>
-    deleteReq(`/auth/guest-codes/${codeId}`),
-};
 
 // ============================================
 // 信号中心 API

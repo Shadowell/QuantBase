@@ -94,7 +94,7 @@ stop_process() {
     fi
 
     # 方式3: 通过端口清理
-    local port_pids=$(lsof -ti :"$port" 2>/dev/null || true)
+    local port_pids=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
     if [ -n "$port_pids" ]; then
         for pid in $port_pids; do
             kill -9 "$pid" 2>/dev/null || true
@@ -105,7 +105,7 @@ stop_process() {
 
     # 等待端口释放
     for i in $(seq 1 5); do
-        if ! lsof -ti :"$port" >/dev/null 2>&1; then
+        if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
             echo -e "  ${GREEN}✓ ${name}已停止 (端口 $port 已释放)${NC}"
             return 0
         fi
@@ -113,7 +113,7 @@ stop_process() {
     done
 
     # 最后兜底 — 强杀端口
-    local remaining=$(lsof -ti :"$port" 2>/dev/null || true)
+    local remaining=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
     if [ -n "$remaining" ]; then
         kill -9 $remaining 2>/dev/null || true
         sleep 1

@@ -58,6 +58,8 @@ QuantBase 的核心设计理念是**"一套代码，三处运行"**：
 | **实盘** | `LiveBroker` | OKX 实时 K 线 | 通过 CCXT 发送真实订单 |
 | **回测** | `BacktraderBroker` | 本地历史数据 | Backtrader 引擎撮合 |
 
+> 社区版默认关闭实盘执行。HTTP 实盘变更入口需要服务端显式设置 `QUANTBASE_LIVE_TRADING_ENABLED=1`，MCP 实盘变更工具还需要单独设置 `QUANTBASE_MCP_ENABLE_LIVE_TRADING=1`。仅配置交易所 API key 不会自动启用真实下单路径。
+
 策略代码**完全不需要关心**当前运行在哪种环境中。你只需要调用 `await self.buy(...)`，底层 Broker 会自动处理撮合逻辑。
 
 **这意味着：**

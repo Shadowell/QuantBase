@@ -63,10 +63,10 @@ check_service() {
     fi
 
     # 端口检查
-    if lsof -ti :"$port" >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
         port_open=true
         if [ -z "$pid" ] || [ "$pid_running" = false ]; then
-            pid=$(lsof -ti :"$port" 2>/dev/null | head -1)
+            pid=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
             pid_running=true
             cpu=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs)
             mem=$(ps -p "$pid" -o %mem= 2>/dev/null | xargs)

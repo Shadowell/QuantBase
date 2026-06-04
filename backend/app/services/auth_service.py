@@ -104,7 +104,7 @@ class AuthService:
         max_backtest_days: int = 365,
         created_by: str = "admin",
     ) -> dict[str, Any]:
-        code = f"BP-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()}"
+        code = f"QB-{secrets.token_urlsafe(9).replace('_', '').replace('-', '').upper()}"
         expires_at = _now() + timedelta(minutes=max(1, int(expires_in_minutes or 60)))
         conn = self.db.get_connection()
         cur = conn.cursor()

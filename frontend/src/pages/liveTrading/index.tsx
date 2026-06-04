@@ -3,7 +3,6 @@ import { useSearchParams } from 'react-router-dom';
 import { FlaskConical, Radio } from 'lucide-react';
 import clsx from 'clsx';
 import { liveApi, monitorApi, paperApi, tradingApi } from '../../api/client';
-import { useAuth } from '../../auth/AuthProvider';
 import { useStore } from '../../stores/useStore';
 import ThemeDialog from '../../components/ThemeDialog';
 import type {
@@ -513,8 +512,6 @@ function dashboardMatchesInstance(
 
 function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   const [initialPrefs] = useState<LivePrefsStored | null>(() => loadLivePrefs());
-  const { isGuest } = useAuth();
-  const readOnly = isGuest;
   const { selectedExchange, setSelectedExchange } = useStore();
 
   useLayoutEffect(() => {
@@ -533,13 +530,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   useEffect(() => {
     void loadInstanceMonitor();
   }, []);
-
-  useEffect(() => {
-    if (readOnly && view === 'create') {
-      setView('dashboard');
-      setCreateStep('select');
-    }
-  }, [readOnly, view]);
 
   const [tradeModeState, setTradeModeState] = useState<TradeMode>(() =>
     modeScope ?? (initialPrefs?.tradeMode === 'live' ? 'live' : 'paper'),
@@ -1549,7 +1539,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   };
 
   const handleDeletePaper = async (instanceId: string) => {
-    if (readOnly) return;
     try {
       await paperApi.deleteInstance(instanceId);
       loadPaperInstances();
@@ -1563,7 +1552,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   };
 
   const handleClearAllPaper = async () => {
-    if (readOnly) return;
     try {
       await paperApi.clearInstances();
       loadPaperInstances();
@@ -1573,7 +1561,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   };
 
   const handleCardPausePaperTrading = (inst: TradingInstance) => {
-    if (readOnly) return;
     const instanceId = toLiveApiInstanceId(inst.id);
     if (instanceId == null) {
       openAlertDialog({
@@ -1621,7 +1608,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   };
 
   const handleCardStopPaperTrading = (inst: TradingInstance) => {
-    if (readOnly) return;
     const instanceId = toLiveApiInstanceId(inst.id);
     if (instanceId == null) {
       openAlertDialog({
@@ -1664,7 +1650,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   };
 
   const executeStop = async (clearMetrics: boolean) => {
-    if (readOnly) return;
     try {
       if (!activeInstanceId) return;
       const stoppedId = activeInstanceId;
@@ -1695,7 +1680,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   };
 
   const handleMonitorStop = () => {
-    if (readOnly) return;
     const pk = paperInstanceKey(activeInstanceId);
     if (pk) {
       openConfirmDialog({
@@ -1716,7 +1700,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   };
 
   const handlePauseResume = async () => {
-    if (readOnly) return;
     const qid = activeInstanceId ? toLiveApiInstanceId(activeInstanceId) : undefined;
     try {
       const nextState = isPaused ? 'running' : 'paused';
@@ -1756,7 +1739,6 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
   };
 
   const handleClosePaperPosition = async (position: PaperPositionCloseRequest) => {
-    if (readOnly) return;
     if (!activeInstanceId) {
       throw new Error('缺少模拟实例 ID');
     }
@@ -1899,9 +1881,8 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
           promotionPreflightId={promotionPreflightId}
           promotionConfirmingId={promotionConfirmingId}
           promotionBusyId={promotionBusyId}
-          readOnly={readOnly}
+          readOnly={false}
           onCreateClick={() => {
-            if (readOnly) return;
             setView('create');
             setCreateStep('select');
           }}
@@ -1930,7 +1911,7 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
         />
       )}
 
-      {view === 'create' && !readOnly && (
+      {view === 'create' && (
         <CreateWizard
           createStep={createStep}
           setCreateStep={setCreateStep}
@@ -2011,7 +1992,7 @@ function LiveTradingWorkspace({ modeScope }: { modeScope?: TradeMode }) {
             isRunning={isRunning}
             isPaused={isPaused}
             paperDetail={paperDetail}
-            readOnly={readOnly}
+            readOnly={false}
             wsExchange={selectedExchange}
             onBack={() => {
               const next = new URLSearchParams(searchParams);

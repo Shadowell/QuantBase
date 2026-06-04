@@ -1,4 +1,4 @@
-import { Suspense, useState, useRef, useEffect, useCallback } from 'react';
+import { Suspense, useState, useRef, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import {
@@ -19,42 +19,29 @@ import {
   Cpu,
   PlugZap,
   Plus,
-  Rocket,
-  ScanLine,
-  LogOut,
-  KeyRound,
   Network,
-  Trash2,
-  ShieldCheck,
 } from 'lucide-react';
 import clsx from 'clsx';
 import {
-  authApi,
   settingsApi,
-  type GuestAccessCode,
   type LLMModelSettings,
 } from '../api/client';
-import { useAuth } from '../auth/AuthProvider';
 import { useSettingsStore, type ColorScheme } from '../stores/useSettingsStore';
 import CryptoSelect from './CryptoSelect';
 import { QuantBaseLogo } from './QuantBaseLogo';
 import { PageErrorBoundary } from './PageErrorBoundary';
 
-type NavRole = 'admin' | 'guest';
-
 const navItems = [
-  { path: '/', icon: LayoutDashboard, label: '首页', allowedRoles: ['admin', 'guest'] },
-  { path: '/market', icon: TrendingUp, label: '行情', allowedRoles: ['admin', 'guest'] },
-  { path: '/strategy', icon: Code2, label: '策略', allowedRoles: ['admin', 'guest'] },
-  { path: '/backtest', icon: FlaskConical, label: '回测', allowedRoles: ['admin', 'guest'] },
-  { path: '/arbitrage', icon: ArrowLeftRight, label: '套利', allowedRoles: ['admin', 'guest'] },
-  { path: '/live', icon: Activity, label: '模拟', allowedRoles: ['admin', 'guest'] },
-  { path: '/live-real', icon: Rocket, label: '实盘', allowedRoles: ['admin', 'guest'] },
-  { path: '/watch', icon: ScanLine, label: '盯盘', allowedRoles: ['admin', 'guest'] },
-  { path: '/monitor', icon: Eye, label: '监控', allowedRoles: ['admin', 'guest'] },
-  { path: '/data', icon: Database, label: '数据', allowedRoles: ['admin', 'guest'] },
-  { path: '/onchain', icon: Network, label: '链上', allowedRoles: ['admin', 'guest'] },
-  { path: '/ai-lab', icon: Sparkles, label: 'AI研发', allowedRoles: ['admin', 'guest'] },
+  { path: '/', icon: LayoutDashboard, label: '首页' },
+  { path: '/market', icon: TrendingUp, label: '行情' },
+  { path: '/strategy', icon: Code2, label: '策略' },
+  { path: '/backtest', icon: FlaskConical, label: '回测' },
+  { path: '/arbitrage', icon: ArrowLeftRight, label: '套利' },
+  { path: '/live', icon: Activity, label: '模拟' },
+  { path: '/monitor', icon: Eye, label: '监控' },
+  { path: '/data', icon: Database, label: '数据' },
+  { path: '/onchain', icon: Network, label: '链上' },
+  { path: '/ai-lab', icon: Sparkles, label: 'AI研发' },
 ];
 
 /** 颜色方案预览卡片 */
@@ -145,197 +132,8 @@ function SettingsSection({
   );
 }
 
-function GuestCodeManager() {
-  const [codes, setCodes] = useState<GuestAccessCode[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [status, setStatus] = useState('');
-  const [createdCode, setCreatedCode] = useState('');
-  const [form, setForm] = useState({
-    note: '',
-    expiresInMinutes: 60,
-    maxBacktestsPerDay: 10,
-    maxConcurrentBacktests: 1,
-    maxBacktestDays: 365,
-  });
-
-  const loadCodes = useCallback(async () => {
-    setLoading(true);
-    setStatus('');
-    try {
-      const res = await authApi.listGuestCodes();
-      setCodes(res.items || []);
-    } catch (error: any) {
-      setStatus(error?.response?.data?.detail || error?.message || '读取邀请码失败');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadCodes();
-  }, [loadCodes]);
-
-  const createCode = async () => {
-    if (saving) return;
-    setSaving(true);
-    setStatus('');
-    setCreatedCode('');
-    try {
-      const created = await authApi.createGuestCode(form);
-      setCreatedCode(created.code);
-      setForm((current) => ({ ...current, note: '' }));
-      await loadCodes();
-    } catch (error: any) {
-      setStatus(error?.response?.data?.detail || error?.message || '生成邀请码失败');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const revokeCode = async (codeId: number) => {
-    setStatus('');
-    try {
-      await authApi.revokeGuestCode(codeId);
-      setCodes((current) => current.filter((code) => code.id !== codeId));
-      await loadCodes();
-    } catch (error: any) {
-      setStatus(error?.response?.data?.detail || error?.message || '撤销邀请码失败');
-    }
-  };
-
-  return (
-    <SettingsSection
-      title="访客邀请码管理"
-      icon={<KeyRound className="h-4 w-4 text-cyan-300" />}
-      description="生成临时访客入口，访客仅拥有只读查看和受配额限制的回测权限。"
-      status={
-        <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan-500/25 bg-cyan-500/10 px-2 py-1 text-[10px] text-cyan-200">
-          <ShieldCheck className="h-3 w-3" />
-          管理员
-        </span>
-      }
-    >
-      <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(180px,1.2fr)_repeat(4,minmax(90px,0.7fr))_auto]">
-        <label className="flex min-w-0 flex-col gap-2">
-          <input
-            value={form.note}
-            onChange={(event) => setForm((current) => ({ ...current, note: event.target.value }))}
-            placeholder="备注，如 客户演示 / 研究访客"
-            className="h-10 rounded-lg border border-crypto-border bg-crypto-bg px-3 text-sm text-white outline-none placeholder:text-gray-600 focus:border-cyan-500/60"
-          />
-          <span className="text-[10px] font-medium text-gray-600">备注</span>
-        </label>
-        <label className="flex min-w-0 flex-col gap-2">
-          <input
-            type="number"
-            min={1}
-            value={form.expiresInMinutes}
-            onChange={(event) => setForm((current) => ({ ...current, expiresInMinutes: Number(event.target.value) }))}
-            title="有效分钟"
-            className="h-10 rounded-lg border border-crypto-border bg-crypto-bg px-3 text-sm text-white outline-none focus:border-cyan-500/60"
-          />
-          <span className="text-[10px] font-medium text-gray-600">有效分钟</span>
-        </label>
-        <label className="flex min-w-0 flex-col gap-2">
-          <input
-            type="number"
-            min={0}
-            value={form.maxBacktestsPerDay}
-            onChange={(event) => setForm((current) => ({ ...current, maxBacktestsPerDay: Number(event.target.value) }))}
-            title="每日回测"
-            className="h-10 rounded-lg border border-crypto-border bg-crypto-bg px-3 text-sm text-white outline-none focus:border-cyan-500/60"
-          />
-          <span className="text-[10px] font-medium text-gray-600">每日次数</span>
-        </label>
-        <label className="flex min-w-0 flex-col gap-2">
-          <input
-            type="number"
-            min={1}
-            value={form.maxConcurrentBacktests}
-            onChange={(event) => setForm((current) => ({ ...current, maxConcurrentBacktests: Number(event.target.value) }))}
-            title="并发回测"
-            className="h-10 rounded-lg border border-crypto-border bg-crypto-bg px-3 text-sm text-white outline-none focus:border-cyan-500/60"
-          />
-          <span className="text-[10px] font-medium text-gray-600">并发数</span>
-        </label>
-        <label className="flex min-w-0 flex-col gap-2">
-          <input
-            type="number"
-            min={1}
-            value={form.maxBacktestDays}
-            onChange={(event) => setForm((current) => ({ ...current, maxBacktestDays: Number(event.target.value) }))}
-            title="最长区间天数"
-            className="h-10 rounded-lg border border-crypto-border bg-crypto-bg px-3 text-sm text-white outline-none focus:border-cyan-500/60"
-          />
-          <span className="text-[10px] font-medium text-gray-600">最长天数</span>
-        </label>
-        <button
-          type="button"
-          onClick={() => void createCode()}
-          disabled={saving}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-cyan-500/40 bg-cyan-500/15 px-4 text-sm font-medium text-cyan-100 transition-colors hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:border-crypto-border disabled:bg-crypto-bg disabled:text-gray-600"
-        >
-          <Plus className="h-4 w-4" />
-          {saving ? '生成中' : '生成'}
-        </button>
-      </div>
-
-      {createdCode && (
-        <div className="mt-3 rounded-xl border border-cyan-500/25 bg-cyan-500/10 p-3 text-sm text-cyan-100">
-          新邀请码仅显示一次：
-          <span className="ml-2 font-mono text-base font-bold tracking-wide text-white">{createdCode}</span>
-        </div>
-      )}
-      {status && <div className="mt-2 text-[11px] text-amber-300">{status}</div>}
-
-      <div className="mt-4 overflow-hidden rounded-xl border border-crypto-border">
-        <div className="grid grid-cols-[minmax(160px,1fr)_150px_150px_90px] gap-3 border-b border-crypto-border bg-crypto-bg/60 px-3 py-2 text-[11px] font-semibold text-gray-500">
-          <span>备注</span>
-          <span>有效期</span>
-          <span>配额</span>
-          <span className="text-right">操作</span>
-        </div>
-        <div className="max-h-52 overflow-y-auto divide-y divide-crypto-border/70">
-          {loading ? (
-            <div className="px-3 py-6 text-center text-sm text-gray-500">加载中…</div>
-          ) : codes.length === 0 ? (
-            <div className="px-3 py-6 text-center text-sm text-gray-500">暂无邀请码</div>
-          ) : (
-            codes.map((code) => (
-              <div
-                key={code.id}
-                className="grid grid-cols-[minmax(160px,1fr)_150px_150px_90px] items-center gap-3 px-3 py-2 text-xs"
-              >
-                <div className="min-w-0">
-                  <div className="truncate font-medium text-gray-200">{code.note || '未命名邀请码'}</div>
-                  <div className="mt-0.5 text-[10px] text-gray-600">#{code.id} · 可用</div>
-                </div>
-                <div className="text-gray-400">{code.expiresAt ? new Date(code.expiresAt).toLocaleString() : '-'}</div>
-                <div className="text-gray-500">
-                  {code.maxBacktestsPerDay}/日 · 并发 {code.maxConcurrentBacktests} · {code.maxBacktestDays}天
-                </div>
-                <div className="text-right">
-                  <button
-                    type="button"
-                    onClick={() => void revokeCode(code.id)}
-                    className="inline-flex h-8 items-center justify-center rounded-lg border border-red-500/25 px-2 text-red-300 transition-colors hover:bg-red-500/10"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    </SettingsSection>
-  );
-}
-
 export default function MainLayout() {
   const location = useLocation();
-  const { role, authEnabled, isAdmin, isGuest, logout } = useAuth();
   const { colorScheme, setColorScheme } = useSettingsStore();
   const [showSettings, setShowSettings] = useState(false);
   const [feishuWebhookUrl, setFeishuWebhookUrl] = useState('');
@@ -352,8 +150,6 @@ export default function MainLayout() {
   const [llmTesting, setLlmTesting] = useState(false);
   const [llmStatus, setLlmStatus] = useState('');
   const settingsRef = useRef<HTMLDivElement>(null);
-  const activeRole: NavRole = role === 'guest' ? 'guest' : 'admin';
-  const visibleNavItems = navItems.filter((item) => item.allowedRoles.includes(activeRole));
 
   // 点击外部关闭设置面板
   useEffect(() => {
@@ -368,7 +164,7 @@ export default function MainLayout() {
   }, [showSettings]);
 
   useEffect(() => {
-    if (!showSettings || !isAdmin) return;
+    if (!showSettings) return;
     let cancelled = false;
     setFeishuError('');
     setFeishuSaved(false);
@@ -393,7 +189,7 @@ export default function MainLayout() {
     return () => {
       cancelled = true;
     };
-  }, [isAdmin, showSettings]);
+  }, [showSettings]);
 
   const saveFeishuWebhook = async () => {
     const next = feishuWebhookUrl.trim();
@@ -475,7 +271,7 @@ export default function MainLayout() {
 
         {/* 导航 */}
         <nav className="flex-1 py-4">
-          {visibleNavItems.map((item) => (
+          {navItems.map((item) => (
             <NavLink
               key={item.path}
               to={item.path}
@@ -500,52 +296,22 @@ export default function MainLayout() {
           <div className="w-full flex items-center justify-center py-1.5 text-[10px] rounded bg-blue-600 text-white font-medium">
             OKX
           </div>
-          {authEnabled && (
-            <div className={clsx(
-              'w-full rounded px-1 py-1 text-center text-[9px] font-semibold',
-              isGuest ? 'bg-cyan-500/10 text-cyan-300' : 'bg-emerald-500/10 text-emerald-300',
-            )}>
-              {isGuest ? '访客' : '管理员'}
-            </div>
-          )}
-          {isAdmin && (
-            <button
-              onClick={() => setShowSettings(true)}
-              className={clsx(
-                'w-full flex flex-col items-center justify-center h-10 text-xs rounded transition-colors',
-                showSettings
-                  ? 'text-blue-400 bg-blue-500/10'
-                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
-              )}
-            >
-              <Settings className="w-4 h-4" />
-            </button>
-          )}
-          {authEnabled && (
-            <button
-              onClick={() => void logout()}
-              className="w-full flex flex-col items-center justify-center h-10 text-xs rounded text-gray-500 transition-colors hover:bg-gray-800 hover:text-gray-200"
-              title="退出登录"
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
-          )}
+          <button
+            onClick={() => setShowSettings(true)}
+            className={clsx(
+              'w-full flex flex-col items-center justify-center h-10 text-xs rounded transition-colors',
+              showSettings
+                ? 'text-blue-400 bg-blue-500/10'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
+            )}
+          >
+            <Settings className="w-4 h-4" />
+          </button>
         </div>
       </aside>
 
       {/* 主内容区 */}
       <main className="flex-1 overflow-auto min-h-0">
-        {isGuest && (
-          <div className="sticky top-0 z-30 border-b border-cyan-500/20 bg-crypto-bg/95 px-4 py-2 backdrop-blur">
-            <div className="flex items-start gap-2 rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs leading-5 text-cyan-100">
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />
-              <p className="min-w-0">
-                <span className="font-semibold text-cyan-200">访客模式：</span>
-                部分页面功能不可用，仅支持查看和受限回测；策略启停、实盘控制、配置修改、数据/AI 写入需管理员权限。
-              </p>
-            </div>
-          </div>
-        )}
         <PageErrorBoundary resetKey={location.pathname}>
           <Suspense
             fallback={
@@ -560,7 +326,7 @@ export default function MainLayout() {
       </main>
 
       {/* 设置面板 */}
-      {showSettings && isAdmin && (
+      {showSettings && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 py-6">
           <div
             ref={settingsRef}
@@ -719,8 +485,6 @@ export default function MainLayout() {
                     : ''}
                 </div>
               </SettingsSection>
-
-              <GuestCodeManager />
 
               <SettingsSection
                 title="飞书 Webhook"

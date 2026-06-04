@@ -27,6 +27,7 @@ def build_client() -> TestClient:
 def _temp_db(tmp_path, monkeypatch) -> LocalDatabase:
     database = LocalDatabase(str(tmp_path / "quantbase-live-execution.db"))
     database.init_db()
+    monkeypatch.setattr(live.settings, "QUANTBASE_LIVE_TRADING_ENABLED", True, raising=False)
     if hasattr(live, "_clear_live_private_read_cache"):
         live._clear_live_private_read_cache()
     monkeypatch.setattr(live, "db", database)
@@ -50,6 +51,35 @@ def _temp_db(tmp_path, monkeypatch) -> LocalDatabase:
     )
     monkeypatch.setattr(live.strategy_engine, "get_strategy_status", lambda strategy_id: None)
     return database
+
+
+def test_live_execution_mutations_are_disabled_by_default(tmp_path, monkeypatch):
+    _temp_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(live.settings, "QUANTBASE_LIVE_TRADING_ENABLED", False, raising=False)
+    client = build_client()
+
+    created = client.post(
+        "/api/v2/live/accounts",
+        json={
+            "name": "Blocked Account",
+            "api_key": "abcd1234efgh5678",
+            "api_secret": "secret-value",
+            "passphrase": "pass-value",
+        },
+    )
+    promoted = client.post(
+        "/api/v2/live/promote",
+        json={
+            "source_strategy_id": 1,
+            "confirm_paper_reviewed": True,
+            "confirm_live_risk": True,
+        },
+    )
+
+    assert created.status_code == 400
+    assert promoted.status_code == 400
+    assert "QUANTBASE_LIVE_TRADING_ENABLED=1" in str(created.json())
+    assert "QUANTBASE_LIVE_TRADING_ENABLED=1" in str(promoted.json())
 
 
 def test_live_execution_strategy_settings_persist_without_deploy(tmp_path, monkeypatch):

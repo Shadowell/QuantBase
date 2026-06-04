@@ -76,6 +76,15 @@ _live_private_read_cache: Dict[tuple[Any, ...], tuple[float, Any]] = {}
 _live_private_read_inflight: Dict[tuple[Any, ...], asyncio.Task[Any]] = {}
 
 
+def _require_live_trading_enabled(action: str = "实盘功能") -> None:
+    if bool(getattr(settings, "QUANTBASE_LIVE_TRADING_ENABLED", False)):
+        return
+    raise BadRequestError(
+        f"{action} 默认关闭；如需使用真实账户读取或实盘执行，请在服务端设置 "
+        "QUANTBASE_LIVE_TRADING_ENABLED=1，并自行承担真实资金风险。"
+    )
+
+
 def _clone_live_private_read(value: Any) -> Any:
     return copy.deepcopy(value)
 
@@ -2434,6 +2443,8 @@ def _build_dashboard(strategy_id: int) -> Dict[str, Any]:
 @router.post("/configure")
 async def live_configure(body: LiveConfigureBody):
     global _active_strategy_id
+    if not body.dry_run:
+        _require_live_trading_enabled("实盘配置")
     sid = _parse_strategy_id(body.strategy_type)
     existing = db.get_strategy_by_id(sid)
     if not existing:
@@ -2766,6 +2777,7 @@ def _require_live_subscription_control(
 
 @router.post("/strategies/{strategy_id}/preflight")
 async def preflight_live_execution_strategy(strategy_id: int, body: LiveStrategyPreflightBody):
+    _require_live_trading_enabled("实盘预检")
     account_id = live_account_service.validate_live_deployable_account_id(body.account_id or "default")
     row = _require_added_live_strategy(int(strategy_id), account_id)
     promote_body = _live_execution_body_to_promote(int(strategy_id), body)
@@ -2789,6 +2801,7 @@ async def preflight_live_execution_strategy(strategy_id: int, body: LiveStrategy
 
 @router.post("/strategies/{strategy_id}/deploy")
 async def deploy_live_execution_strategy(strategy_id: int, body: LiveStrategyDeployBody):
+    _require_live_trading_enabled("实盘部署")
     if not body.confirm_paper_reviewed or not body.confirm_live_risk:
         raise BadRequestError("部署实盘需要确认已复核模拟盘表现，并确认真实资金风险")
 
@@ -2917,6 +2930,7 @@ async def pause_live_strategy_subscription(strategy_id: int, body: LiveStrategyS
 
 @router.post("/strategies/{strategy_id}/resume")
 async def resume_live_strategy_subscription(strategy_id: int, body: LiveStrategySubscriptionControlBody):
+    _require_live_trading_enabled("恢复实盘订阅")
     account_id = live_account_service.validate_account_id(body.account_id or "default")
     row, _ = _require_live_subscription_control(int(strategy_id), account_id)
     subscription = live_signal_execution_service.set_subscription_status(
@@ -3002,6 +3016,7 @@ async def list_live_accounts():
 
 @router.post("/accounts")
 async def create_live_account(body: LiveAccountCreateBody):
+    _require_live_trading_enabled("新增实盘账户")
     account = live_account_service.create_account(
         name=body.name,
         api_key=body.api_key,
@@ -3013,6 +3028,7 @@ async def create_live_account(body: LiveAccountCreateBody):
 
 
 def _live_account_exchange_alias(account_id: str) -> tuple[str, str]:
+    _require_live_trading_enabled("真实账户读取")
     normalized = live_account_service.validate_live_deployable_account_id(account_id)
     return normalized, live_account_service.exchange_alias_for_account(normalized)
 
@@ -3463,6 +3479,7 @@ async def live_account_positions(
 
 @router.post("/accounts/{account_id}/positions/close")
 async def live_account_close_position(account_id: str, body: LivePositionCloseBody):
+    _require_live_trading_enabled("真实账户平仓")
     if not body.confirm_live_risk:
         raise BadRequestError("平仓需要二次确认 confirm_live_risk=true")
     normalized, exchange = _live_account_exchange_alias(account_id)
@@ -3792,6 +3809,8 @@ async def _run_preflight_checks(
 
 @router.post("/pre_flight")
 async def live_pre_flight(body: PreFlightBody):
+    if not body.dry_run:
+        _require_live_trading_enabled("实盘飞行检查")
     sid = _parse_strategy_id(body.strategy)
     row = db.get_strategy_by_id(sid)
     timeframe = _strategy_defined_timeframe(row)
@@ -3809,11 +3828,13 @@ async def live_pre_flight(body: PreFlightBody):
 
 @router.post("/promote/preflight")
 async def promote_to_live_preflight(body: PromoteToLiveBody):
+    _require_live_trading_enabled("实盘预检")
     return ok(await _run_promote_preflight(body))
 
 
 @router.post("/promote")
 async def promote_to_live(body: PromoteToLiveBody):
+    _require_live_trading_enabled("实盘部署")
     if not body.confirm_paper_reviewed or not body.confirm_live_risk:
         raise BadRequestError("部署实盘需要确认已复核模拟盘表现，并确认真实资金风险")
 
