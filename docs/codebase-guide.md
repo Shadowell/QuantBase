@@ -7,8 +7,8 @@
 1. `README.md`：了解产品定位、主要页面和运行边界。
 2. `docs/README.md`：按产品、架构、页面、合同、研究、部署、QA 和截图找到文档入口。
 3. `docs/spec.md`：了解当前产品合同、行为约束和长期规格。
-4. `docs/ARCHITECTURE.md`：了解分层架构、核心数据流和部署边界。
-5. `docs/OPEN_SOURCE_SCOPE.md`：了解社区版保留和剥离范围。
+4. `docs/architecture.md`：了解分层架构、核心数据流和部署边界。
+5. `docs/open-source-scope.md`：了解社区版保留和剥离范围。
 6. `docs/progress.md`：了解整理时间线、验证记录和遗留事项。
 
 本仓库把文档当作系统状态的一部分。只要行为、接口、页面或运行方式发生变化，就应该同步更新对应规格、页面文档和进度记录。
@@ -132,19 +132,19 @@ K 线数据有两个真实数据来源：
 - `/data`
 - `/ai-lab`
 
-页面模块使用 lazy loading。主布局和登录态 provider 保留在页面路由外层，避免懒加载或 Vite chunk 替换时整页布局被 fallback 顶掉。
+页面模块使用 lazy loading。主布局保留在页面路由外层，避免懒加载或 Vite chunk 替换时整页布局被 fallback 顶掉。社区版前端不提供登录页面或访客只读 UI；如需访问控制，请在二次开发或部署层接入。
 
 `frontend/src/api/client.ts` 统一管理 REST 行为：
 
 - Axios base URL 是 `/api/v2`。
-- 请求携带 credentials，以支持服务端 session cookie。
+- 请求携带 credentials，以兼容二次开发中的服务端 session cookie。
 - API envelope 在客户端边界统一 unwrap。
 - snake_case 和 camelCase 在客户端边界互转。
 - 长时间的数据同步和同步式回测使用比普通 REST 更长的 timeout。
 
 ## 文档维护
 
-长期产品边界写在 `docs/spec.md`，开源社区版范围写在 `docs/OPEN_SOURCE_SCOPE.md`。当一级页面发生变化时，应同步更新 `docs/pages/`。页面文档需要说明页面目的、布局、数据来源、交互、空态/错误态和截图要求。
+长期产品边界写在 `docs/spec.md`，开源社区版范围写在 `docs/open-source-scope.md`。当一级页面发生变化时，应同步更新 `docs/pages/`。页面文档需要说明页面目的、布局、数据来源、交互、空态/错误态和截图要求。
 
 ## 部署与运行
 
@@ -154,7 +154,7 @@ K 线数据有两个真实数据来源：
 ./scripts/check.sh
 ```
 
-`./init.sh` 会安装依赖、初始化 SQLite，并导入 `data/seed/strategies.json` 中的 10 个公开 demo 策略。`./start.sh`、`./stop.sh`、`./status.sh` 面向本地演示和开发；生产部署、远程数据库同步、域名、反向代理和密钥注入由使用者自行配置。
+`./init.sh` 会安装依赖、初始化 SQLite，并导入 `data/seed/strategies.json` 中的 10 个公开 demo 策略。`./start.sh`、`./stop.sh`、`./status.sh` 面向本地演示和开发；详细运行手册见 `docs/local-deployment.md`。生产部署、远程数据库同步、域名、反向代理和密钥注入由使用者自行配置。
 
 ## 安全扩展方式
 

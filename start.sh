@@ -109,19 +109,19 @@ rotate_log() {
 
 # ===== 端口检查 =====
 check_port() {
-    lsof -ti :"$1" >/dev/null 2>&1
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN -t >/dev/null 2>&1
 }
 
 if [ "$START_BACKEND" = true ] && check_port $BACKEND_PORT; then
     echo -e "${RED}✗ 端口 $BACKEND_PORT 被占用${NC}"
-    echo -e "  占用进程: $(lsof -ti :$BACKEND_PORT | head -3 | xargs ps -p 2>/dev/null | tail -n +2 || echo '未知')"
+    echo -e "  占用进程: $(lsof -nP -iTCP:$BACKEND_PORT -sTCP:LISTEN -t | head -3 | xargs ps -p 2>/dev/null | tail -n +2 || echo '未知')"
     echo -e "  请先运行 ${YELLOW}./stop.sh${NC}"
     exit 1
 fi
 
 if [ "$START_FRONTEND" = true ] && check_port $FRONTEND_PORT; then
     echo -e "${RED}✗ 端口 $FRONTEND_PORT 被占用${NC}"
-    echo -e "  占用进程: $(lsof -ti :$FRONTEND_PORT | head -3 | xargs ps -p 2>/dev/null | tail -n +2 || echo '未知')"
+    echo -e "  占用进程: $(lsof -nP -iTCP:$FRONTEND_PORT -sTCP:LISTEN -t | head -3 | xargs ps -p 2>/dev/null | tail -n +2 || echo '未知')"
     echo -e "  请先运行 ${YELLOW}./stop.sh${NC}"
     exit 1
 fi

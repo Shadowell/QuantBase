@@ -13,7 +13,6 @@ import CryptoSelect from '../components/CryptoSelect';
 import ThemeDialog from '../components/ThemeDialog';
 import StrategyParameterSections from '../components/StrategyParameterSections';
 import { getStrategyParameterSections } from '../utils/strategyConfigDisplay';
-import { useAuth } from '../auth/AuthProvider';
 
 function isStrategyRunningOrPaused(status: string | undefined): boolean {
   return status === 'running' || status === 'paused';
@@ -351,8 +350,7 @@ function strategyNameColorClass(assetClass: StrategyAssetClass): string {
 // ============================================
 export default function Strategy() {
   const navigate = useNavigate();
-  const { isGuest } = useAuth();
-  const canWriteStrategy = !isGuest;
+  const canWriteStrategy = true;
   const [strategies, setStrategies] = useState<StrategyType[]>([]);
   const [isLoadingStrategies, setIsLoadingStrategies] = useState(false);
   const [strategyListError, setStrategyListError] = useState<string | null>(null);

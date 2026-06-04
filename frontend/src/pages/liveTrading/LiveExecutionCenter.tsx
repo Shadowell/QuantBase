@@ -35,7 +35,6 @@ import {
   type LiveExecutionPreflight,
   type LiveExecutionStrategy,
 } from '../../api/client';
-import { useAuth } from '../../auth/AuthProvider';
 
 const strategyFilters = [
   { key: 'all', label: '全部' },
@@ -483,8 +482,6 @@ function deploymentStatusForAccount(strategy: LiveExecutionStrategy, accountId: 
 
 export default function LiveExecutionCenter() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { isGuest } = useAuth();
-  const readOnly = isGuest;
   const [strategies, setStrategies] = useState<LiveExecutionStrategy[]>([]);
   const [selectedStrategyId, setSelectedStrategyId] = useState<number | null>(() => {
     const raw = Number(searchParams.get('strategy_id') || searchParams.get('strategyId'));
@@ -910,7 +907,6 @@ export default function LiveExecutionCenter() {
   };
 
   const createLiveAccount = async () => {
-    if (readOnly) return;
     setAccountSaving(true);
     setError('');
     setAccountError('');
@@ -935,7 +931,6 @@ export default function LiveExecutionCenter() {
   };
 
   const addStrategy = async (strategy: LiveExecutionStrategy) => {
-    if (readOnly) return;
     if (!canUseAccountForLiveDeployment(selectedAccount)) {
       setError('Binance 本阶段仅展示，不参与实盘策略绑定、预检或部署。');
       return;
@@ -962,7 +957,6 @@ export default function LiveExecutionCenter() {
   };
 
   const toggleAccountPicker = (strategyId: number) => {
-    if (readOnly) return;
     setAccountPickerStrategyId((prev) => {
       const nextOpen = prev !== strategyId;
       if (!nextOpen) setPendingBindAccountId('');
@@ -971,7 +965,6 @@ export default function LiveExecutionCenter() {
   };
 
   const bindAccountToStrategy = async (strategy: LiveExecutionStrategy, accountId: string) => {
-    if (readOnly) return;
     if (!accountId) return;
     const actionKey = `${strategy.strategyId}:${accountId}`;
     setAccountBindingAction(actionKey);
@@ -1000,7 +993,6 @@ export default function LiveExecutionCenter() {
   };
 
   const unbindAccountFromStrategy = async (strategy: LiveExecutionStrategy, accountId: string) => {
-    if (readOnly) return;
     const actionKey = `${strategy.strategyId}:${accountId}`;
     setAccountBindingAction(actionKey);
     setError('');
@@ -1029,7 +1021,6 @@ export default function LiveExecutionCenter() {
   };
 
   const runPreflight = async (strategy: LiveExecutionStrategy) => {
-    if (readOnly) return;
     const key = preflightKey(strategy.strategyId, selectedAccountId);
     if (!boundAccountIds(strategy).includes(selectedAccountId)) {
       setPreflights((prev) => ({
@@ -1074,7 +1065,6 @@ export default function LiveExecutionCenter() {
   };
 
   const deployStrategy = async (strategy: LiveExecutionStrategy) => {
-    if (readOnly) return;
     const key = preflightKey(strategy.strategyId, selectedAccountId);
     if (!boundAccountIds(strategy).includes(selectedAccountId)) {
       setPreflights((prev) => ({
@@ -1123,7 +1113,6 @@ export default function LiveExecutionCenter() {
   };
 
   const pauseDeployment = async (strategy: LiveExecutionStrategy) => {
-    if (readOnly) return;
     setActioningId(strategy.strategyId);
     try {
       const res = await liveExecutionApi.pauseStrategy(strategy.strategyId, { accountId: selectedAccountId });
@@ -1138,7 +1127,6 @@ export default function LiveExecutionCenter() {
   };
 
   const resumeDeployment = async (strategy: LiveExecutionStrategy) => {
-    if (readOnly) return;
     setActioningId(strategy.strategyId);
     try {
       const res = await liveExecutionApi.resumeStrategy(strategy.strategyId, { accountId: selectedAccountId });
@@ -1153,7 +1141,6 @@ export default function LiveExecutionCenter() {
   };
 
   const stopDeployment = async (strategy: LiveExecutionStrategy) => {
-    if (readOnly) return;
     setActioningId(strategy.strategyId);
     try {
       const res = await liveExecutionApi.stopStrategy(strategy.strategyId, { accountId: selectedAccountId });
@@ -1171,7 +1158,6 @@ export default function LiveExecutionCenter() {
     strategy: LiveExecutionStrategy,
     positionsToClose: LiveExecutionPosition[],
   ) => {
-    if (readOnly) return;
     setActioningId(strategy.strategyId);
     try {
       const closeSymbols = Array.from(
@@ -1196,7 +1182,6 @@ export default function LiveExecutionCenter() {
   };
 
   const openDeployConfirm = (strategy: LiveExecutionStrategy) => {
-    if (readOnly) return;
     setConfirmState({
       title: '确认部署实盘',
       content: `将为当前模拟策略创建 ${selectedAccount?.name || selectedAccountId} 的实盘执行订阅。后续源模拟策略产生信号时，该账户会按同一信号真实下单。\n策略：${strategy.strategyName}`,
@@ -1212,7 +1197,6 @@ export default function LiveExecutionCenter() {
   const openStopConfirm = (
     strategy: LiveExecutionStrategy,
   ) => {
-    if (readOnly) return;
     const relatedPositions = liveStopRelatedContractPositions(strategy, contractPositions);
     if (relatedPositions.length > 0) {
       const symbols = relatedPositions
@@ -1537,20 +1521,18 @@ export default function LiveExecutionCenter() {
                   </option>
                 ))}
               </CryptoSelect>
-              {!readOnly && (
-                <button
-                  type="button"
-                  onClick={() => setAccountFormOpen((open) => !open)}
-                  className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-blue-400/35 bg-blue-500/15 px-3 text-xs font-semibold text-blue-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_10px_24px_rgba(37,99,235,0.14)] hover:border-blue-300/55 hover:bg-blue-500/25 hover:text-white"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  增加账户
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => setAccountFormOpen((open) => !open)}
+                className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-blue-400/35 bg-blue-500/15 px-3 text-xs font-semibold text-blue-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_10px_24px_rgba(37,99,235,0.14)] hover:border-blue-300/55 hover:bg-blue-500/25 hover:text-white"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                增加账户
+              </button>
             </div>
           </div>
 
-          {!readOnly && accountFormOpen && (
+          {accountFormOpen && (
             <div className="mb-3 rounded-xl border border-red-500/25 bg-crypto-bg/70 p-3">
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-100">
                 <KeyRound className="h-4 w-4 text-red-300" />
@@ -1763,7 +1745,7 @@ export default function LiveExecutionCenter() {
                           <span className="shrink-0 rounded-full bg-amber-500/15 px-2 py-1 text-[11px] font-semibold text-amber-200">
                             已加入
                           </span>
-                        ) : !readOnly && (
+                        ) : (
                           <button
                             type="button"
                             disabled={actioningId === strategy.strategyId || !canAddStrategy}
@@ -1817,7 +1799,7 @@ export default function LiveExecutionCenter() {
             </div>
             {selectedStrategies.length === 0 ? (
               <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-dashed border-crypto-border text-center text-sm text-gray-500">
-                {readOnly ? '暂无已加入实盘策略' : '从左侧选择策略并点击加入实盘'}
+                从左侧选择策略并点击加入实盘
               </div>
             ) : (
               <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
@@ -1893,25 +1875,23 @@ export default function LiveExecutionCenter() {
                                 <span className="text-gray-500">
                                   已绑定 {strategyAccountIds.length}/{accounts.length}
                                 </span>
-                                {!readOnly && (
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleAccountPicker(strategy.strategyId)}
-                                    aria-expanded={pickerOpen}
-                                    className={clsx(
-                                      'inline-flex h-7 items-center justify-center rounded-md border px-2 text-[11px] font-semibold transition-colors',
-                                      pickerOpen
-                                        ? 'border-crypto-border bg-crypto-bg text-gray-100'
-                                        : 'border-crypto-border bg-crypto-bg text-gray-200 hover:border-blue-500/35 hover:text-blue-200 hover:bg-white/[0.03]',
-                                    )}
-                                  >
-                                    + 绑定账户
-                                  </button>
-                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => toggleAccountPicker(strategy.strategyId)}
+                                  aria-expanded={pickerOpen}
+                                  className={clsx(
+                                    'inline-flex h-7 items-center justify-center rounded-md border px-2 text-[11px] font-semibold transition-colors',
+                                    pickerOpen
+                                      ? 'border-crypto-border bg-crypto-bg text-gray-100'
+                                      : 'border-crypto-border bg-crypto-bg text-gray-200 hover:border-blue-500/35 hover:text-blue-200 hover:bg-white/[0.03]',
+                                  )}
+                                >
+                                  + 绑定账户
+                                </button>
                               </div>
                             </div>
 
-                            {!readOnly && pickerOpen && (
+                            {pickerOpen && (
                               <div className="rounded-md border border-crypto-border bg-crypto-bg/70 p-2">
                                 <div className="mb-2 text-xs font-semibold text-gray-300">选择账户后点击绑定</div>
                                 {accountOptions.length === 0 ? (
@@ -2008,22 +1988,20 @@ export default function LiveExecutionCenter() {
                                     >
                                       {bound ? '已绑定' : '未绑定'}
                                     </span>
-                                    {!readOnly && (
-                                      <button
-                                        type="button"
-                                        disabled={busy || accountDeployed || !deployableAccount}
-                                        title={!deployableAccount ? 'Binance 本阶段仅展示，不参与实盘部署' : bound ? '解除账户绑定' : '绑定账户'}
-                                        onClick={() =>
-                                          bound
-                                            ? void unbindAccountFromStrategy(strategy, account.accountId)
-                                            : void bindAccountToStrategy(strategy, account.accountId)
-                                        }
-                                        className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md border border-crypto-border bg-crypto-card px-2 text-[11px] font-semibold text-gray-200 hover:border-blue-500/35 hover:text-blue-200 disabled:cursor-not-allowed disabled:opacity-60"
-                                      >
-                                        <Link2 size={12} />
-                                        {bound ? '解绑' : '绑定'}
-                                      </button>
-                                    )}
+                                    <button
+                                      type="button"
+                                      disabled={busy || accountDeployed || !deployableAccount}
+                                      title={!deployableAccount ? 'Binance 本阶段仅展示，不参与实盘部署' : bound ? '解除账户绑定' : '绑定账户'}
+                                      onClick={() =>
+                                        bound
+                                          ? void unbindAccountFromStrategy(strategy, account.accountId)
+                                          : void bindAccountToStrategy(strategy, account.accountId)
+                                      }
+                                      className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md border border-crypto-border bg-crypto-card px-2 text-[11px] font-semibold text-gray-200 hover:border-blue-500/35 hover:text-blue-200 disabled:cursor-not-allowed disabled:opacity-60"
+                                    >
+                                      <Link2 size={12} />
+                                      {bound ? '解绑' : '绑定'}
+                                    </button>
                                   </div>
                                 );
                               })}
@@ -2032,7 +2010,7 @@ export default function LiveExecutionCenter() {
 
                           <div className="border-t border-crypto-border pt-3">
                             <div className="mb-2 text-xs font-semibold text-gray-400">实盘部署流水线</div>
-                            {readOnly ? null : renderDeployPipeline()}
+                            {renderDeployPipeline()}
                           </div>
                         </div>
                       )}
@@ -2159,37 +2137,35 @@ export default function LiveExecutionCenter() {
                                   {accountLabel(accounts, selectedAccountId)} · 来源模拟策略 #{strategy.strategyId}
                                 </div>
                               </div>
-                              {!readOnly && (
-                                <div className="flex shrink-0 items-center gap-2">
-                                  <button
-                                    type="button"
-                                    disabled={!canToggleDeployment || strategyBusy}
-                                    aria-label={canResumeDeployment ? '继续实盘信号' : '暂停实盘信号'}
-                                    title={canResumeDeployment ? '恢复当前账户的实盘信号执行' : '仅暂停当前账户实盘信号执行，源模拟策略继续运行并继续产生模拟盘信号'}
-                                    onClick={() =>
-                                      canResumeDeployment
-                                        ? void resumeDeployment(strategy)
-                                        : void pauseDeployment(strategy)
-                                    }
-                                    className={clsx(
-                                      livePanelActionButtonBase,
-                                      canResumeDeployment ? liveActionButtonSuccess : liveActionButtonWarning,
-                                    )}
-                                  >
-                                    {canResumeDeployment ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
-                                    {canResumeDeployment ? '继续实盘信号' : '暂停实盘信号'}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={!canStopCurrentDeployment || strategyBusy}
-                                    onClick={() => openStopConfirm(strategy)}
-                                    className={clsx(livePanelActionButtonBase, liveActionButtonDanger)}
-                                  >
-                                    <Square className="h-3.5 w-3.5" />
-                                    停止
-                                  </button>
-                                </div>
-                              )}
+                              <div className="flex shrink-0 items-center gap-2">
+                                <button
+                                  type="button"
+                                  disabled={!canToggleDeployment || strategyBusy}
+                                  aria-label={canResumeDeployment ? '继续实盘信号' : '暂停实盘信号'}
+                                  title={canResumeDeployment ? '恢复当前账户的实盘信号执行' : '仅暂停当前账户实盘信号执行，源模拟策略继续运行并继续产生模拟盘信号'}
+                                  onClick={() =>
+                                    canResumeDeployment
+                                      ? void resumeDeployment(strategy)
+                                      : void pauseDeployment(strategy)
+                                  }
+                                  className={clsx(
+                                    livePanelActionButtonBase,
+                                    canResumeDeployment ? liveActionButtonSuccess : liveActionButtonWarning,
+                                  )}
+                                >
+                                  {canResumeDeployment ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+                                  {canResumeDeployment ? '继续实盘信号' : '暂停实盘信号'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={!canStopCurrentDeployment || strategyBusy}
+                                  onClick={() => openStopConfirm(strategy)}
+                                  className={clsx(livePanelActionButtonBase, liveActionButtonDanger)}
+                                >
+                                  <Square className="h-3.5 w-3.5" />
+                                  停止
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );

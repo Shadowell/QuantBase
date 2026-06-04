@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     QUANTBASE_AUTH_COOKIE_SECURE: bool = False
     QUANTBASE_ADMIN_SESSION_HOURS: int = 24 * 365 * 10
 
+    # 真实账户与实盘执行总开关。社区版默认关闭。
+    QUANTBASE_LIVE_TRADING_ENABLED: bool = False
+
     # Redis 配置 (可选)
     REDIS_URL: Optional[str] = None
 

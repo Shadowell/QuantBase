@@ -1,6 +1,6 @@
 # QuantBase 技术架构
 
-本文档面向开发者、维护者和 AI Agent，说明 QuantBase 的主要运行层、数据流、持久化边界和验证方式。README 只保留入口视角，长期产品行为以 [docs/spec.md](spec.md) 为准，开源社区版边界以 [docs/OPEN_SOURCE_SCOPE.md](OPEN_SOURCE_SCOPE.md) 为准。
+本文档面向开发者、维护者和 AI Agent，说明 QuantBase 的主要运行层、数据流、持久化边界和验证方式。README 只保留入口视角，长期产品行为以 [docs/spec.md](spec.md) 为准，开源社区版边界以 [docs/open-source-scope.md](open-source-scope.md) 为准。
 
 ## 1. 架构目标
 

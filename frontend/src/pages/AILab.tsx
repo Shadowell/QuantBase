@@ -339,7 +339,7 @@ const ORBIT_AUTO_POST_DEFAULT_CONFIG: OrbitAutoPostConfig = {
   cooldownHours: 24,
   maxPostsPerDay: 12,
   llmModel: '',
-  copyStyle: '吸引跟单但不夸大，不承诺收益，突出真实仓位、方向、收益率和风险控制。',
+  copyStyle: '用于研究复盘分享，不夸大，不承诺收益，突出真实仓位、方向、收益率和风险控制。',
   publishMode: 'orbit_web',
   truthfulOnly: true,
 };
@@ -1505,7 +1505,7 @@ export default function AILab() {
       setOrbitHistory(data.history || []);
       setOrbitLoginStatus(unwrapApiData<OrbitLoginStatus>(login));
     } catch (e: any) {
-      setOrbitStatus(e?.response?.data?.detail || e.message || '星球发帖状态读取失败');
+      setOrbitStatus(e?.response?.data?.detail || e.message || '星球研究复盘状态读取失败');
     } finally {
       setOrbitLoading(false);
     }
@@ -1522,10 +1522,10 @@ export default function AILab() {
       const nextConfig = { ...orbitConfig, ...updates };
       const saved = await api.put('/agent/orbit-auto-post/config', orbitConfigPayload(nextConfig));
       setOrbitConfig(normalizeOrbitAutoPostConfig(unwrapApiData(saved)));
-      setOrbitStatus('星球发帖配置已保存');
+      setOrbitStatus('星球研究复盘配置已保存');
       await refreshOrbitAutoPost();
     } catch (e: any) {
-      setOrbitStatus(e?.response?.data?.detail || e.message || '星球发帖配置保存失败');
+      setOrbitStatus(e?.response?.data?.detail || e.message || '星球研究复盘配置保存失败');
     } finally {
       setOrbitSaving(false);
     }
@@ -1538,7 +1538,7 @@ export default function AILab() {
       const res = unwrapApiData<{ posted_count?: number; skipped?: string; posted?: OrbitPostRecord[] }>(
         await api.post('/agent/orbit-auto-post/run-now')
       );
-      setOrbitStatus(res.posted_count ? `已发布 ${res.posted_count} 条星球动态` : `未发布：${res.skipped || '暂无符合条件的合约单'}`);
+      setOrbitStatus(res.posted_count ? `已发布 ${res.posted_count} 条研究复盘动态` : `未发布：${res.skipped || '暂无符合条件的合约单'}`);
       await refreshOrbitAutoPost();
     } catch (e: any) {
       setOrbitStatus(e?.response?.data?.detail || e.message || '立即发帖失败');
@@ -2488,7 +2488,7 @@ export default function AILab() {
           <Send size={18} className={activeTab === 'orbit-post' ? 'text-cyan-300' : 'text-cyan-500/70'} />
           <span className="min-w-0">
             <span className="block text-sm font-semibold">星球发帖</span>
-            <span className="block truncate text-[11px] text-current/60">单账号自动发帖、真实合约单</span>
+            <span className="block truncate text-[11px] text-current/60">单账号研究复盘、持仓快照</span>
           </span>
         </button>
       </div>
@@ -2502,11 +2502,11 @@ export default function AILab() {
               <div className="min-w-0">
                 <div className="inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-500/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-200">
                   <Radio size={13} />
-                  OKX Orbit · 单账号自动发帖
+                  OKX Orbit · 单账号研究复盘
                 </div>
-                <h2 className="mt-3 text-2xl font-semibold text-gray-50">真实合约单星球发布台</h2>
+                <h2 className="mt-3 text-2xl font-semibold text-gray-50">合约持仓研究复盘发布台</h2>
                 <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-400">
-                  只读取已绑定 OKX 实盘账户的当前合约持仓，收益超过阈值后生成 AI 文案并提交星球；同一合约单按冷却时间去重，文案保留真实收益和风险提示。
+                  只读取已绑定 OKX 实盘账户的当前合约持仓，达到分享阈值后生成 AI 复盘文案并提交星球；同一合约单按冷却时间去重，文案保留真实仓位、收益数据和风险提示。
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -2521,7 +2521,7 @@ export default function AILab() {
                   }`}
                 >
                   {orbitConfig.enabled ? <PauseCircle size={15} /> : <Play size={15} />}
-                  {orbitConfig.enabled ? '自动发帖 ON' : '自动发帖 OFF'}
+                  {orbitConfig.enabled ? '自动复盘 ON' : '自动复盘 OFF'}
                 </button>
                 <button
                   type="button"
@@ -2530,7 +2530,7 @@ export default function AILab() {
                   className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-cyan-500/45 bg-cyan-500/15 px-4 text-xs font-semibold text-cyan-200 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {orbitRunning ? <RefreshCw size={15} className="animate-spin" /> : <Send size={15} />}
-                  立即扫描并发帖
+                  立即扫描并生成复盘
                 </button>
                 <button
                   type="button"
@@ -2594,7 +2594,7 @@ export default function AILab() {
                 </label>
                 <div className="grid grid-cols-2 gap-3">
                   <label className="block">
-                    <span className="text-xs text-gray-400">收益超过</span>
+                    <span className="text-xs text-gray-400">分享阈值</span>
                     <input
                       type="number"
                       min={0.1}

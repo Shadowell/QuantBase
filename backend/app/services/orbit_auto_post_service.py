@@ -191,7 +191,7 @@ class OrbitAutoPostService:
             "cooldown_hours": 24,
             "max_posts_per_day": 12,
             "llm_model": "",
-            "copy_style": "吸引跟单但不夸大，不承诺收益，突出真实仓位、方向、收益率和风险控制。",
+            "copy_style": "用于研究复盘分享，不夸大，不承诺收益，突出真实仓位、方向、收益率和风险控制。",
             "publish_mode": "orbit_web",
             "truthful_only": True,
             "running": False,
@@ -424,7 +424,7 @@ class OrbitAutoPostService:
                 "role": "system",
                 "content": (
                     "你是合规的 OKX 星球交易动态文案助手。只基于给定真实持仓数据写中文短帖；"
-                    "可以吸引关注和跟单兴趣，但禁止承诺收益、夸大胜率、伪造数据、诱导满仓或无风险表达。"
+                    "可以吸引关注并支持研究复盘，但禁止承诺收益、夸大胜率、伪造数据、诱导满仓或无风险表达。"
                     "必须包含风险提示“不是投资建议”。"
                 ),
             },
@@ -437,7 +437,7 @@ class OrbitAutoPostService:
                         "requirements": [
                             "80 到 180 字",
                             "包含交易对、方向、杠杆、保证金收益率、浮盈",
-                            "结尾提醒跟单需控制仓位和止损",
+                            "结尾提醒仅用于研究复盘并需控制仓位和止损",
                         ],
                     },
                     ensure_ascii=False,
@@ -448,7 +448,7 @@ class OrbitAutoPostService:
             text = await get_qwen_client(model).chat(messages, temperature=0.8, max_tokens=360)
             normalized = str(text or "").strip()
             if "投资建议" not in normalized:
-                normalized = f"{normalized}\n\n不是投资建议，跟单注意仓位和止损。"
+                normalized = f"{normalized}\n\n不是投资建议，仅用于研究复盘，注意仓位和止损。"
             return normalized[:800]
         except Exception as exc:
             return f"{fallback}\n\nAI文案生成失败，已使用真实数据模板：{describe_qwen_exception(exc)}"
@@ -467,7 +467,7 @@ class OrbitAutoPostService:
             f"${base} 合约单达到自动分享阈值：{symbol} {side} {leverage:g}x，"
             f"保证金收益率 {roi:+.2f}%，浮盈 {pnl:+.2f} USDT。"
             f"入场 {entry:g}，当前 {mark:g}。这条来自 QuantBase 读取的 OKX 实盘持仓，"
-            "不构成投资建议，跟单注意仓位和止损。"
+            "不构成投资建议，仅用于研究复盘，注意仓位和止损。"
         )
 
     def _set_runtime(self, **updates: Any) -> None:

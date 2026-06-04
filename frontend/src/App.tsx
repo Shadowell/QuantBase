@@ -1,8 +1,6 @@
 import { lazy } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { AuthProvider, useAuth } from './auth/AuthProvider'
 import MainLayout from './components/MainLayout'
-import Login from './pages/Login'
 
 const Home = lazy(() => import('./pages/Home'))
 const Market = lazy(() => import('./pages/Market'))
@@ -18,20 +16,6 @@ const DataManager = lazy(() => import('./pages/DataManager'))
 const AILab = lazy(() => import('./pages/AILab'))
 
 function AppRoutes() {
-  const { authEnabled, authenticated, loading } = useAuth()
-
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-crypto-bg text-sm text-gray-500">
-        正在检查登录态…
-      </div>
-    )
-  }
-
-  if (authEnabled && !authenticated) {
-    return <Login />
-  }
-
   return (
     <Routes>
       <Route path="/" element={<MainLayout />}>
@@ -57,10 +41,8 @@ function AppRoutes() {
 function App() {
   return (
     <BrowserRouter>
-      <AuthProvider>
-        {/* Suspense 放在 MainLayout 内包裹 Outlet，避免懒加载时整页（含侧栏）被 fallback 顶替 */}
-        <AppRoutes />
-      </AuthProvider>
+      {/* Suspense 放在 MainLayout 内包裹 Outlet，避免懒加载时整页（含侧栏）被 fallback 顶替 */}
+      <AppRoutes />
     </BrowserRouter>
   )
 }

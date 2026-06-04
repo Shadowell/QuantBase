@@ -485,7 +485,7 @@ def test_backtest_page_supports_parallel_instances() -> None:
     assert "backtestApi.getJob(instance.activeJobId)" in source
 
 
-def test_watch_market_route_and_sidebar_position_are_registered() -> None:
+def test_watch_market_route_is_registered_but_sidebar_entry_is_hidden() -> None:
     app = read_text("frontend/src/App.tsx")
     layout = read_text("frontend/src/components/MainLayout.tsx")
 
@@ -493,13 +493,13 @@ def test_watch_market_route_and_sidebar_position_are_registered() -> None:
     assert '<Route path="watch" element={<WatchMarket />} />' in app
 
     live_pos = layout.index("{ path: '/live'")
-    live_real_pos = layout.index("{ path: '/live-real'")
-    watch_pos = layout.index("{ path: '/watch'")
     monitor_pos = layout.index("{ path: '/monitor'")
     data_pos = layout.index("{ path: '/data'")
     assert "{ path: '/signals'" not in layout
-    assert live_pos < live_real_pos < watch_pos < monitor_pos < data_pos
-    assert "label: '盯盘'" in layout
+    assert "{ path: '/live-real'" not in layout
+    assert "{ path: '/watch'" not in layout
+    assert live_pos < monitor_pos < data_pos
+    assert "label: '盯盘'" not in layout
 
 
 def test_watch_market_page_is_read_only_and_defaults_to_15m_with_trade_markers() -> None:

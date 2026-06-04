@@ -22,7 +22,6 @@ test.describe('侧边栏导航', () => {
     { text: '回测', path: '/backtest' },
     { text: '模拟', path: '/live' },
     { text: '监控', path: '/monitor' },
-    { text: '实盘', path: '/live-real' },
   ];
 
   for (const item of navItems) {

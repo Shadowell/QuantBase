@@ -87,7 +87,7 @@ def test_guest_code_plaintext_is_returned_once_and_only_hash_is_stored(tmp_path:
         created_by="admin",
     )
 
-    assert created["code"]
+    assert created["code"].startswith("QB-")
     assert created["expires_at"]
     conn = service.db.get_connection()
     row = conn.execute(

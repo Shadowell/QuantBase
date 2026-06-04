@@ -9,6 +9,9 @@ QuantBase 是面向量化策略研究、工程验证和模拟运行的开源框�
 - 默认运行 paper/simulation。
 - Demo seed 仅用于展示配置形状和平台流程。
 - 真实账户、交易所私有 API、通知 webhook 和 AI provider key 都必须由操作者本地配置，并默认关闭。
+- 真实账户读取和实盘执行默认关闭；相关 HTTP 入口需要操作者显式设置 `QUANTBASE_LIVE_TRADING_ENABLED=1`。
+- MCP 实盘变更工具需要单独显式设置 `QUANTBASE_MCP_ENABLE_LIVE_TRADING=1`，不能因为配置了交易所密钥而自动开启。
+- 前端社区版不提供登录页面；`QUANTBASE_AUTH_ENABLED=1` 仅适合二次开发、API 调试或由部署层提供访问控制的场景。
 - 任何真实交易、信号投递或账户读取风险都由操作者自行承担。
 - 文档、示例、回测和模型输出不得被描述为收益承诺。
 
@@ -36,6 +39,15 @@ QuantBase 是面向量化策略研究、工程验证和模拟运行的开源框�
 - Seeds：`data/seed/strategies.json` 提供公开 demo 策略配置。
 - Optional AI：Kairos/SuperPnL 本地模型依赖放在 `backend/requirements-ai.txt`，基础安装不拉取 torch 或模型仓库。
 
+## 本地运行合同
+
+- `./init.sh` 是首次运行入口，负责依赖安装、`.env` 模板复制、SQLite 初始化和 demo seed 导入。
+- `./start.sh` 启动本地后端和前端，默认端口为后端 8889、前端 8888。
+- `./status.sh` 检查 PID、端口、健康接口、日志和本地数据库。
+- `./stop.sh` 停止本地服务。
+- `./scripts/check.sh` 是不启动长服务的默认验证入口。
+- 详细说明维护在 `docs/local-deployment.md`。
+
 ## 非目标
 
 - 不提供投资建议、跟单、托管账户或收益承诺。
@@ -46,9 +58,9 @@ QuantBase 是面向量化策略研究、工程验证和模拟运行的开源框�
 ## 文档维护规则
 
 - 长期产品边界写在本文件。
-- 架构和数据流写在 `docs/ARCHITECTURE.md`。
+- 架构和数据流写在 `docs/architecture.md`。
 - 页面工作流写在 `docs/pages/`。
-- 开源边界写在 `docs/OPEN_SOURCE_SCOPE.md`。
+- 开源边界写在 `docs/open-source-scope.md`。
 - 每轮有意义的项目整理写入 `docs/progress.md`。
 
 ## 验收方向
