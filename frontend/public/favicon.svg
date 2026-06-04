@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102A56"/>
+      <stop offset="0.48" stop-color="#08111E"/>
+      <stop offset="1" stop-color="#020617"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(44 17) rotate(127) scale(42 35)">
+      <stop stop-color="#22D3EE" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="url(#bg)"/>
+  <rect x="5.5" y="5.5" width="53" height="53" rx="14.5" fill="none" stroke="#2563EB" stroke-opacity="0.95" stroke-width="3"/>
+  <rect x="9" y="9" width="46" height="46" rx="12.5" fill="none" stroke="#22D3EE" stroke-opacity="0.16" stroke-width="1.5"/>
+  <rect x="10" y="10" width="44" height="44" rx="12" fill="url(#glow)"/>
+  <path d="M13.6 45.2C19.1 51.1 30 52.5 40.2 48C48.4 44.4 53.4 37.1 53.3 29" fill="none" stroke="#2563EB" stroke-opacity="0.38" stroke-width="3" stroke-linecap="round"/>
+  <text x="32" y="44.2" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="35" font-weight="900" fill="#EAF2FF" stroke="#06111E" stroke-width="2.4" paint-order="stroke">B</text>
+</svg>

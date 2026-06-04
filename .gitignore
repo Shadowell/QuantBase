@@ -1,0 +1,113 @@
+# ============================================
+# QuantBase .gitignore
+# ============================================
+
+# === 敏感文件 ===
+.env
+*.env
+backend/.env
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+
+# === Node.js ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# === 构建产物 ===
+frontend/dist/
+frontend/build/
+
+# === IDE/编辑器 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# === 日志 ===
+logs/
+*.log
+
+# === 数据库 ===
+*.db
+*.sqlite
+*.sqlite3
+
+# === 保留种子数据 ===
+data/klines/
+data/ai_lab_model_config.json
+!data/seed/
+
+# === 测试 ===
+test-results/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage/
+
+# === 其他 ===
+.cursor/
+*.pid
+playwright-report/
+blob-report/
+
+# === AI Agent / Tool 配置目录 ===
+.adal/
+.agent/
+.agents/
+.aider-desk/
+.augment/
+.bob/
+.claude/
+.codeartsdoer/
+.codebuddy/
+.codemaker/
+.codestudio/
+.commandcode/
+.continue/
+.cortex/
+.crush/
+.devin/
+.factory/
+.forge/
+.goose/
+.iflow/
+.junie/
+.kilocode/
+.kiro/
+.kode/
+.mcpjam/
+.mux/
+.neovate/
+.openhands/
+.pi/
+.pochi/
+.qoder/
+.qwen/
+.roo/
+.rovodev/
+.tabnine/
+.trae/
+.vibe/
+.windsurf/
+.zencoder/
+skills-lock.json
+skills/

@@ -1,0 +1,13 @@
+# Optional AI model dependencies.
+#
+# Install this file only when you want to run local Kairos/SuperPnL inference:
+#
+#   pip install -r backend/requirements.txt
+#   pip install -r backend/requirements-ai.txt
+#
+# Torch wheel availability depends on Python version, OS, and CPU/GPU target.
+# Python 3.11 is the recommended runtime for this optional stack.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu; python_version < "3.13"
+git+https://github.com/Shadowell/Kairos.git

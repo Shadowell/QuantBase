@@ -1,0 +1,20 @@
+{
+  "name": "quantbase",
+  "version": "0.1.0",
+  "description": "Open-source quantitative research base for market data, backtesting, paper execution, and signal audit.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}

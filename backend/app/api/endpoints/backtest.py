@@ -1,0 +1,1530 @@
+"""
+回测 API
+==============================
+- POST /run_sync, /run       : 按 strategy_id 回测（BaseStrategy，与实盘同构）
+- POST /run_new              : 按 strategy_name 回测（注册表键名）
+- GET  /strategies           : 已注册的 strategy_key 列表
+- GET  /new_strategies       : 与 /strategies 一致（兼容旧客户端）
+- GET  /results, /result/id  : 历史回测结果
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Request
+from typing import List, Optional, Dict, Any, Type, Set, Literal
+from pydantic import BaseModel
+from datetime import datetime, date
+import asyncio
+import json
+import logging
+import numpy as np
+import uuid
+import threading
+from dataclasses import asdict
+
+from app.db.local_db import db_instance as db
+from app.services.backtrader_engine import backtrader_engine, BacktestReport, BacktestCancelled
+from app.services.strategy_registry import (
+    get_strategy_for_id,
+    list_backtestable_registry_keys,
+    get_base_strategy_registry,
+)
+from app.core.execution.base_strategy import BaseStrategy
+from app.services.auth_service import AuthError, auth_service
+from app.services.exchange_fee_model import default_fee_schedule
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+DEFAULT_BACKTEST_SLIPPAGE_BPS = 1.0
+_CANCELLABLE_BACKTEST_STATUSES = {"pending", "running", "cancelling"}
+_TERMINAL_BACKTEST_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
+_RESUMABLE_BACKTEST_STATUSES = {"pending", "running", "cancelling", "failed", "interrupted"}
+_BACKTEST_CANCEL_REQUESTS: Set[str] = set()
+_BACKTEST_CANCEL_LOCK = threading.Lock()
+_ACTIVE_BACKTEST_JOBS: Set[str] = set()
+_ACTIVE_BACKTEST_LOCK = threading.Lock()
+
+
+def _request_backtest_cancel(job_id: str) -> None:
+    with _BACKTEST_CANCEL_LOCK:
+        _BACKTEST_CANCEL_REQUESTS.add(job_id)
+
+
+def _clear_backtest_cancel(job_id: str) -> None:
+    with _BACKTEST_CANCEL_LOCK:
+        _BACKTEST_CANCEL_REQUESTS.discard(job_id)
+
+
+def _is_backtest_cancel_requested(job_id: str) -> bool:
+    with _BACKTEST_CANCEL_LOCK:
+        return job_id in _BACKTEST_CANCEL_REQUESTS
+
+
+def _try_mark_backtest_active(job_id: str) -> bool:
+    with _ACTIVE_BACKTEST_LOCK:
+        if job_id in _ACTIVE_BACKTEST_JOBS:
+            return False
+        _ACTIVE_BACKTEST_JOBS.add(job_id)
+        return True
+
+
+def _clear_backtest_active(job_id: str) -> None:
+    with _ACTIVE_BACKTEST_LOCK:
+        _ACTIVE_BACKTEST_JOBS.discard(job_id)
+
+
+def _is_backtest_active(job_id: str) -> bool:
+    with _ACTIVE_BACKTEST_LOCK:
+        return job_id in _ACTIVE_BACKTEST_JOBS
+
+
+# ============================================
+# 新架构策略注册表（BaseStrategy 子类）
+# ============================================
+
+_NEW_STRATEGY_REGISTRY: Dict[str, Type[BaseStrategy]] = {}
+
+
+def _ensure_new_registry():
+    """延迟加载，避免循环导入；与 strategy_registry.get_base_strategy_registry 同步。"""
+    global _NEW_STRATEGY_REGISTRY
+    if _NEW_STRATEGY_REGISTRY:
+        return
+    from app.services.strategy_registry import get_base_strategy_registry
+
+    _NEW_STRATEGY_REGISTRY.update(get_base_strategy_registry())
+
+
+# ============================================
+# 请求 / 响应 模型
+# ============================================
+
+class BacktestRequest(BaseModel):
+    """回测请求"""
+    strategy_id: int
+    exchange: str = "okx"
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
+    timeframe_mode: str = "strategy"
+    timeframes: Optional[List[str]] = None
+    start_date: str
+    end_date: str
+    initial_capital: float = 10000
+    # Legacy single-rate fields. New clients should submit *_bps fields below.
+    commission: Optional[float] = None
+    slippage: Optional[float] = None
+    maker_fee_bps: Optional[float] = None
+    taker_fee_bps: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    stop_loss: Optional[float] = None       # e.g. 0.05 = 5%
+    take_profit: Optional[float] = None
+    trailing_stop: Optional[float] = None
+
+
+class BacktestResultResponse(BaseModel):
+    """回测结果响应 — 前端使用"""
+    strategy_id: int
+    strategy_name: Optional[str] = None
+    status: str
+    timeframe: Optional[str] = None
+    timeframe_mode: Optional[str] = None
+    matrix_results: Optional[List[Dict[str, Any]]] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    initial_capital: float
+    final_capital: Optional[float] = None
+    total_return: Optional[float] = None
+    annual_return: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    max_drawdown_duration_days: Optional[int] = None
+    sharpe_ratio: Optional[float] = None
+    sortino_ratio: Optional[float] = None
+    calmar_ratio: Optional[float] = None
+    win_rate: Optional[float] = None
+    profit_factor: Optional[float] = None
+    total_trades: Optional[int] = None
+    winning_trades: Optional[int] = None
+    losing_trades: Optional[int] = None
+    funding_fee: Optional[float] = None
+    funding_events: Optional[int] = None
+    avg_win_pct: Optional[float] = None
+    avg_loss_pct: Optional[float] = None
+    max_consecutive_wins: Optional[int] = None
+    max_consecutive_losses: Optional[int] = None
+    expectancy: Optional[float] = None
+    total_fees: Optional[float] = None
+    avg_holding_bars: Optional[float] = None
+    total_bars: Optional[int] = None
+    elapsed_seconds: Optional[float] = None
+    monthly_returns: Optional[Dict[str, float]] = None
+    equity_curve: Optional[List[dict]] = None
+    trades: Optional[List[dict]] = None
+    error_message: Optional[str] = None
+
+
+# ============================================
+# 工具函数
+# ============================================
+
+def _safe_float(v) -> Optional[float]:
+    """将 numpy 类型安全转为 Python float"""
+    if v is None:
+        return None
+    if isinstance(v, (np.floating, np.integer)):
+        val = float(v)
+        if np.isnan(val) or np.isinf(val):
+            return 0.0
+        return val
+    if isinstance(v, float):
+        if np.isnan(v) or np.isinf(v):
+            return 0.0
+    return float(v)
+
+
+def _validate_backtest_date_range(
+    start_date: str,
+    end_date: str,
+    *,
+    today: Optional[date] = None,
+) -> tuple[date, date]:
+    """Validate operator-supplied backtest date bounds before touching data stores."""
+    try:
+        start = date.fromisoformat(str(start_date))
+        end = date.fromisoformat(str(end_date))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="回测日期格式必须为 YYYY-MM-DD")
+
+    if start > end:
+        raise HTTPException(status_code=400, detail="回测开始日期不能晚于结束日期")
+
+    current_day = today or datetime.now().date()
+    if end > current_day:
+        raise HTTPException(
+            status_code=400,
+            detail=f"回测结束日期不能晚于当前日期 {current_day.isoformat()}",
+        )
+
+    return start, end
+
+
+def _backtest_report_to_response(
+    report: BacktestReport,
+    strategy_id: int,
+    strategy_name: str,
+    request: BacktestRequest,
+) -> BacktestResultResponse:
+    """将 BaseStrategy/Backtrader 的 BacktestReport 转为前端 BacktestResultResponse。"""
+    trades_list = []
+
+    closed_by_exit: Dict[tuple[str, int], Dict[str, Any]] = {}
+    for closed in report.trades or []:
+        symbol = str(closed.get("symbol") or "")
+        exit_time = int(closed.get("exit_time") or 0)
+        if symbol and exit_time > 0:
+            closed_by_exit[(symbol, exit_time)] = closed
+
+    order_records = getattr(report, "orders", None) or []
+    if order_records:
+        for order in order_records:
+            symbol = order.get("symbol")
+            timestamp = int(order.get("timestamp") or 0)
+            px = float(order.get("price") or 0.0)
+            qty = float(order.get("size") or order.get("quantity") or 0.0)
+            notional = float(order.get("notional_usdt") or order.get("notional") or abs(px * qty) or 0.0)
+            leverage = _safe_float(order.get("leverage"))
+            margin = _safe_float(order.get("margin"))
+            if (margin is None or margin <= 0) and leverage and leverage > 0 and notional > 0:
+                margin = notional / leverage
+            matched = closed_by_exit.get((str(symbol or ""), timestamp))
+            pnl_net = float((matched or {}).get("pnl_net") or order.get("pnl_net") or 0.0)
+            pnl_pct = (pnl_net / notional * 100.0) if notional > 1e-12 else 0.0
+            trades_list.append({
+                "symbol": symbol,
+                "timestamp": timestamp,
+                "side": order.get("side") or "buy",
+                "price": round(px, 8),
+                "quantity": round(qty, 8),
+                "notional_usdt": round(notional, 4),
+                "leverage": round(leverage, 4) if leverage is not None else None,
+                "margin": round(margin, 4) if margin is not None else None,
+                "pnl": round(pnl_net, 4),
+                "pnl_pct": round(pnl_pct, 4),
+                "fee": round(float(order.get("commission") or 0.0), 4),
+                "reason": order.get("reason") or "fill",
+            })
+    else:
+        for t in report.trades or []:
+            entry_px = float(t.get("entry_price") or 0)
+            size = float(t.get("size") or 0)
+            pnl_net = float(t.get("pnl_net") or t.get("pnl") or 0)
+            notional = abs(entry_px * size) if entry_px and size else 0.0
+            leverage = _safe_float(t.get("leverage"))
+            margin = _safe_float(t.get("margin"))
+            if (margin is None or margin <= 0) and leverage and leverage > 0 and notional > 0:
+                margin = notional / leverage
+            pnl_pct = (pnl_net / notional * 100.0) if notional > 1e-12 else 0.0
+            trades_list.append({
+                "symbol": t.get("symbol"),
+                "timestamp": int(t.get("exit_time") or t.get("entry_time") or 0),
+                "side": t.get("side") or "long",
+                "price": round(entry_px, 4),
+                "quantity": round(size, 6),
+                "notional_usdt": round(notional, 4),
+                "leverage": round(leverage, 4) if leverage is not None else None,
+                "margin": round(margin, 4) if margin is not None else None,
+                "pnl": round(pnl_net, 4),
+                "pnl_pct": round(pnl_pct, 4),
+                "fee": round(float(t.get("commission") or 0), 4),
+                "reason": "close",
+            })
+
+    return BacktestResultResponse(
+        strategy_id=strategy_id,
+        strategy_name=strategy_name,
+        status=report.status,
+        timeframe=request.timeframe,
+        timeframe_mode=_backtest_timeframe_mode(request),
+        start_date=request.start_date,
+        end_date=request.end_date,
+        initial_capital=_safe_float(request.initial_capital),
+        final_capital=_safe_float(report.final_capital),
+        total_return=_safe_float(report.total_return_pct),
+        annual_return=_safe_float(report.annual_return_pct),
+        max_drawdown=_safe_float(report.max_drawdown_pct),
+        max_drawdown_duration_days=int(report.max_drawdown_duration_days or 0),
+        sharpe_ratio=_safe_float(report.sharpe_ratio),
+        sortino_ratio=_safe_float(report.sortino_ratio),
+        calmar_ratio=_safe_float(report.calmar_ratio),
+        win_rate=_safe_float(report.win_rate_pct),
+        profit_factor=_safe_float(report.profit_factor),
+        total_trades=int(report.total_trades),
+        winning_trades=int(report.winning_trades),
+        losing_trades=int(report.losing_trades),
+        avg_win_pct=None,
+        avg_loss_pct=None,
+        max_consecutive_wins=None,
+        max_consecutive_losses=None,
+        expectancy=None,
+        total_fees=_safe_float(report.total_fees),
+        funding_fee=_safe_float(getattr(report, "funding_fee", 0.0)),
+        funding_events=int(getattr(report, "funding_events", 0) or 0),
+        avg_holding_bars=_safe_float(report.avg_holding_bars),
+        total_bars=int(report.total_bars),
+        elapsed_seconds=_safe_float(report.elapsed_seconds),
+        monthly_returns=report.monthly_returns or None,
+        equity_curve=report.equity_curve or None,
+        trades=trades_list,
+        error_message=report.error_message if report.status == "failed" else None,
+    )
+
+
+def _clean_symbols(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = [raw]
+        raw = parsed
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for item in raw:
+        symbol = str(item or "").strip()
+        if symbol and symbol not in out:
+            out.append(symbol)
+    return out
+
+
+def _parse_base_quote_symbol(symbol: str) -> Optional[tuple[str, str]]:
+    value = str(symbol or "").strip()
+    if not value:
+        return None
+
+    upper_value = value.upper()
+    if upper_value.endswith("-SWAP"):
+        core = upper_value[:-5].strip("-")
+        parts = [part for part in core.split("-") if part]
+        if len(parts) >= 2:
+            return "-".join(parts[:-1]), parts[-1]
+        if len(parts) == 1:
+            return parts[0], "USDT"
+
+    pair = upper_value.split(":", 1)[0]
+    if "/" in pair:
+        base, quote = pair.split("/", 1)
+        base = base.strip()
+        quote = quote.strip()
+        if base and quote:
+            return base, quote
+
+    return None
+
+
+def _backtest_market_data_symbol(symbol: str, *, is_swap: bool) -> str:
+    parsed = _parse_base_quote_symbol(symbol)
+    if not parsed:
+        return str(symbol or "").strip()
+    base, quote = parsed
+    if is_swap:
+        return f"{base}/{quote}:{quote}"
+    return f"{base}/{quote}"
+
+
+def _normalize_backtest_market_data_symbols(symbols: List[str], *, is_swap: bool) -> List[str]:
+    out: List[str] = []
+    for symbol in symbols:
+        normalized = _backtest_market_data_symbol(symbol, is_swap=is_swap)
+        if normalized and normalized not in out:
+            out.append(normalized)
+    return out
+
+
+def _strategy_symbols_for_backtest(strategy_info: Dict[str, Any], request: BacktestRequest) -> List[str]:
+    """Backtest feed universe resolved to the strategy asset class market data."""
+    cfg = strategy_info.get("db_config") or {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    is_swap = _is_swap_strategy_for_backtest(strategy_info)
+
+    symbols: List[str] = []
+    if is_swap:
+        symbols.extend(_clean_symbols(cfg.get("trade_symbols")))
+        symbols.extend(_clean_symbols(cfg.get("tradeSymbols")))
+        symbols.extend(_clean_symbols(cfg.get("target_symbol")))
+
+    symbols.extend(_clean_symbols(strategy_info.get("symbols")))
+    if not symbols:
+        symbols = _clean_symbols(cfg.get("symbols"))
+    if not symbols:
+        symbols = _clean_symbols(request.symbol)
+    symbols = _normalize_backtest_market_data_symbols(symbols or ["BTC/USDT"], is_swap=is_swap)
+    return symbols or ["BTC/USDT:USDT" if is_swap else "BTC/USDT"]
+
+
+BACKTEST_TIMEFRAME_ALIASES = {
+    "1M": "1m",
+    "5M": "5m",
+    "15M": "15m",
+    "30M": "30m",
+    "1H": "1h",
+    "4H": "4h",
+    "1D": "1d",
+}
+BACKTEST_ALLOWED_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+
+
+def _normalize_backtest_timeframe(raw: Any) -> Optional[str]:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    value = BACKTEST_TIMEFRAME_ALIASES.get(value.upper(), value.lower())
+    return value if value in BACKTEST_ALLOWED_TIMEFRAMES else None
+
+
+def _strategy_defined_timeframe_for_backtest(strategy_info: Dict[str, Any]) -> Optional[str]:
+    cfg = strategy_info.get("db_config") or {}
+    candidates: List[Any] = []
+    if isinstance(cfg, dict):
+        candidates.extend([cfg.get("timeframe"), cfg.get("kline_timeframe")])
+    candidates.append(strategy_info.get("timeframe"))
+    for raw in candidates:
+        timeframe = _normalize_backtest_timeframe(raw) or str(raw or "").strip()
+        if timeframe:
+            return timeframe
+    return None
+
+
+def _backtest_timeframe_mode(request: BacktestRequest) -> str:
+    mode = str(request.timeframe_mode or "strategy").strip().lower()
+    if mode in {"single", "matrix"}:
+        return mode
+    return "strategy"
+
+
+def _strategy_timeframes_for_backtest(strategy_info: Dict[str, Any], request: BacktestRequest) -> List[str]:
+    mode = _backtest_timeframe_mode(request)
+    if mode == "matrix":
+        values = request.timeframes or ([request.timeframe] if request.timeframe else [])
+        resolved: List[str] = []
+        for raw in values:
+            timeframe = _normalize_backtest_timeframe(raw)
+            if timeframe and timeframe not in resolved:
+                resolved.append(timeframe)
+        return resolved or [_strategy_timeframe_for_backtest(strategy_info, request)]
+    return [_strategy_timeframe_for_backtest(strategy_info, request)]
+
+
+def _strategy_timeframe_for_backtest(strategy_info: Dict[str, Any], request: BacktestRequest) -> str:
+    """Backtest K-line timeframe; default to strategy config, explicit single mode may override it."""
+    mode = _backtest_timeframe_mode(request)
+    if mode == "single":
+        explicit = _normalize_backtest_timeframe(request.timeframe)
+        if explicit:
+            return explicit
+
+    if mode == "matrix":
+        first = _normalize_backtest_timeframe((request.timeframes or [request.timeframe or ""])[0])
+        if first:
+            return first
+
+    strategy_timeframe = _strategy_defined_timeframe_for_backtest(strategy_info)
+    if strategy_timeframe:
+        return strategy_timeframe
+    legacy = _normalize_backtest_timeframe(request.timeframe)
+    return legacy or "1h"
+
+
+def _strategy_config_for_backtest(db_config: Any, timeframe: str) -> Dict[str, Any]:
+    cfg = dict(db_config) if isinstance(db_config, dict) else {}
+    cfg["timeframe"] = timeframe
+    if "kline_timeframe" in cfg:
+        cfg["kline_timeframe"] = timeframe
+    if "klineTimeframe" in cfg:
+        cfg["klineTimeframe"] = timeframe
+    return cfg
+
+
+def _float_or_none(raw: Any) -> Optional[float]:
+    try:
+        if raw is None or raw == "":
+            return None
+        value = float(raw)
+        if not np.isfinite(value):
+            return None
+        return value
+    except (TypeError, ValueError):
+        return None
+
+
+def _legacy_rate_or_percent_to_bps(raw: Any) -> Optional[float]:
+    value = _float_or_none(raw)
+    if value is None:
+        return None
+    # Older clients used "commission/slippage" as decimal rates, while the UI
+    # label made operators enter percentages like 0.08 for 0.08%. Preserve both.
+    if value > 0.02:
+        return value * 100.0
+    return value * 10_000.0
+
+
+def _is_swap_strategy_for_backtest(strategy_info: Dict[str, Any]) -> bool:
+    cfg = strategy_info.get("db_config") or {}
+    name = str(strategy_info.get("name") or "")
+    symbols = _clean_symbols(strategy_info.get("symbols"))
+    if isinstance(cfg, dict):
+        symbols.extend(_clean_symbols(cfg.get("symbols")))
+        symbols.extend(_clean_symbols(cfg.get("trade_symbols")))
+        symbols.extend(_clean_symbols(cfg.get("tradeSymbols")))
+        market_type = str(cfg.get("market_type") or "").lower()
+        inst_type = str(cfg.get("inst_type") or "").upper()
+        if market_type in {"spot", "margin"} or inst_type in {"SPOT", "MARGIN"}:
+            return False
+        if market_type in {"swap", "future", "futures", "contract"} or inst_type == "SWAP":
+            return True
+    if name.startswith("[现货]"):
+        return False
+    if name.startswith("[合约]"):
+        return True
+    return any(":USDT" in s or s.endswith("-SWAP") for s in symbols)
+
+
+def _strategy_cost_request_for_backtest(
+    request: BacktestRequest,
+    strategy_info: Dict[str, Any],
+) -> BacktestRequest:
+    cfg = strategy_info.get("db_config") or {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    is_swap = _is_swap_strategy_for_backtest(strategy_info)
+    default_schedule = default_fee_schedule(request.exchange, "swap" if is_swap else "spot")
+    default_maker = default_schedule.maker_fee_bps
+    default_taker = default_schedule.taker_fee_bps
+
+    cfg_maker_bps = _float_or_none(cfg.get("maker_fee_bps"))
+    cfg_taker_bps = _float_or_none(cfg.get("taker_fee_bps"))
+    cfg_fee_bps = _float_or_none(cfg.get("fee_bps"))
+    cfg_commission_bps = _legacy_rate_or_percent_to_bps(cfg.get("commission_rate"))
+    cfg_slippage_bps = _float_or_none(cfg.get("slippage_bps"))
+    cfg_slippage_rate_bps = _legacy_rate_or_percent_to_bps(cfg.get("slippage_rate"))
+
+    req_maker_bps = _float_or_none(request.maker_fee_bps)
+    req_taker_bps = _float_or_none(request.taker_fee_bps)
+    req_slippage_bps = _float_or_none(request.slippage_bps)
+    req_commission_bps = _legacy_rate_or_percent_to_bps(request.commission)
+    req_slippage_rate_bps = _legacy_rate_or_percent_to_bps(request.slippage)
+
+    maker_fee_bps = (
+        req_maker_bps
+        if req_maker_bps is not None
+        else cfg_maker_bps
+        if cfg_maker_bps is not None
+        else default_maker
+    )
+    taker_fee_bps = (
+        req_taker_bps
+        if req_taker_bps is not None
+        else cfg_taker_bps
+        if cfg_taker_bps is not None
+        else cfg_fee_bps
+        if cfg_fee_bps is not None
+        else req_commission_bps
+        if req_commission_bps is not None
+        else cfg_commission_bps
+        if cfg_commission_bps is not None
+        else default_taker
+    )
+    slippage_bps = (
+        req_slippage_bps
+        if req_slippage_bps is not None
+        else cfg_slippage_bps
+        if cfg_slippage_bps is not None
+        else req_slippage_rate_bps
+        if req_slippage_rate_bps is not None
+        else cfg_slippage_rate_bps
+        if cfg_slippage_rate_bps is not None
+        else DEFAULT_BACKTEST_SLIPPAGE_BPS
+    )
+
+    maker_fee_bps = max(0.0, float(maker_fee_bps))
+    taker_fee_bps = max(0.0, float(taker_fee_bps))
+    slippage_bps = max(0.0, float(slippage_bps))
+    return request.model_copy(
+        update={
+            "maker_fee_bps": maker_fee_bps,
+            "taker_fee_bps": taker_fee_bps,
+            "slippage_bps": slippage_bps,
+            # Backtrader market fills use the taker rate; maker is kept for
+            # config fidelity and future limit-order backtest support.
+            "commission": taker_fee_bps / 10_000.0,
+            "slippage": slippage_bps / 10_000.0,
+        }
+    )
+
+
+def _request_with_strategy_timeframe(
+    request: BacktestRequest,
+    strategy_info: Dict[str, Any],
+) -> BacktestRequest:
+    return request.model_copy(
+        update={"timeframe": _strategy_timeframe_for_backtest(strategy_info, request)}
+    )
+
+
+def _save_report_to_db(
+    report: BacktestReport,
+    strategy_id: int,
+    trades_list: List[dict],
+    start_date: str,
+    end_date: str,
+    initial_capital: float,
+    *,
+    timeframe: Optional[str] = None,
+    timeframe_mode: Optional[str] = None,
+    matrix_results: Optional[List[Dict[str, Any]]] = None,
+    result_payload: Optional[Dict[str, Any]] = None,
+):
+    """BacktestReport 落库。"""
+    try:
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        trades_json = json.dumps(trades_list, ensure_ascii=False)
+        matrix_results_json = (
+            json.dumps(matrix_results, ensure_ascii=False)
+            if matrix_results
+            else None
+        )
+        result_json = (
+            json.dumps(result_payload, ensure_ascii=False)
+            if result_payload
+            else None
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO backtest_results
+            (strategy_id, start_date, end_date, initial_capital, final_capital,
+             total_return, annual_return, max_drawdown, sharpe_ratio, win_rate,
+             profit_factor, total_trades, trades_detail, timeframe, timeframe_mode,
+             matrix_results_json, result_json, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                strategy_id,
+                start_date,
+                end_date,
+                float(initial_capital),
+                float(report.final_capital),
+                float(report.total_return_pct),
+                float(report.annual_return_pct),
+                float(report.max_drawdown_pct),
+                float(report.sharpe_ratio),
+                float(report.win_rate_pct),
+                float(report.profit_factor),
+                int(report.total_trades),
+                trades_json,
+                timeframe,
+                timeframe_mode,
+                matrix_results_json,
+                result_json,
+                report.status,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error("保存 BaseStrategy 回测结果失败: %s", e)
+
+
+def _insert_backtest_job(
+    job_id: str,
+    strategy_id: int,
+    request: BacktestRequest,
+    *,
+    owner_role: str | None = None,
+    owner_session_id: str | None = None,
+    owner_guest_code_id: int | None = None,
+) -> None:
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO backtest_jobs (
+            job_id, strategy_id, request_json, status, current_bar, total_bars,
+            owner_role, owner_session_id, owner_guest_code_id
+        ) VALUES (?, ?, ?, 'pending', 0, 0, ?, ?, ?)
+        """,
+        (job_id, strategy_id, request.model_dump_json(), owner_role, owner_session_id, owner_guest_code_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _auth_context(request: Request) -> Dict[str, Any]:
+    return dict(getattr(request.state, "auth", None) or {})
+
+
+def _auth_service_for_request(request: Request):
+    return getattr(request.state, "auth_service", auth_service)
+
+
+def _ensure_backtest_job_access(row: Any, auth: Dict[str, Any]) -> None:
+    if auth.get("role") != "guest":
+        return
+    if row is None:
+        return
+    if str(row["owner_session_id"] or "") != str(auth.get("session_id") or ""):
+        raise HTTPException(status_code=403, detail="访客只能查看或管理自己创建的回测任务")
+
+
+def _update_backtest_job(job_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cols = ", ".join(f"{k} = ?" for k in fields)
+    vals = list(fields.values())
+    vals.append(job_id)
+    cursor.execute(
+        f"UPDATE backtest_jobs SET {cols}, updated_at = datetime('now') WHERE job_id = ?",
+        vals,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _run_backtest_job_worker(job_id: str, payload: Dict[str, Any]) -> None:
+    """在线程中执行回测；progress_hook 写入 backtest_jobs。"""
+    try:
+        request = BacktestRequest(**payload)
+        if _is_backtest_cancel_requested(job_id):
+            raise BacktestCancelled("用户已停止回测")
+
+        strategy_info = get_strategy_for_id(request.strategy_id)
+        if not strategy_info:
+            keys = sorted(get_base_strategy_registry().keys())
+            _update_backtest_job(
+                job_id,
+                status="failed",
+                error_message=(
+                    f"策略 #{request.strategy_id} 无法解析为 BaseStrategy；"
+                    f"已注册键: {keys}"
+                ),
+            )
+            return
+
+        strategy_name = strategy_info.get("name", "")
+        strategy_class = strategy_info["strategy_class"]
+        db_config = strategy_info.get("db_config") or {}
+        requested_timeframes = _strategy_timeframes_for_backtest(strategy_info, request)
+        request = _strategy_cost_request_for_backtest(request, strategy_info)
+        symbols = _strategy_symbols_for_backtest(strategy_info, request)
+        matrix_mode = _backtest_timeframe_mode(request) == "matrix" and len(requested_timeframes) > 1
+
+        completed_bars_before_current_run = 0
+        total_bars_across_runs = 0
+
+        def progress_hook(cur: int, total: int) -> None:
+            try:
+                if _is_backtest_cancel_requested(job_id):
+                    _update_backtest_job(
+                        job_id,
+                        status="cancelling",
+                        current_bar=completed_bars_before_current_run + cur,
+                        total_bars=total_bars_across_runs or total,
+                        message="用户请求停止回测，正在安全结束",
+                    )
+                    return
+                _update_backtest_job(
+                    job_id,
+                    status="running",
+                    current_bar=completed_bars_before_current_run + cur,
+                    total_bars=total_bars_across_runs or total,
+                )
+            except Exception:
+                pass
+
+        _update_backtest_job(job_id, status="running", message=None)
+        matrix_responses: List[Dict[str, Any]] = []
+        primary_report: Optional[BacktestReport] = None
+        primary_request: Optional[BacktestRequest] = None
+
+        for timeframe in requested_timeframes:
+            if _is_backtest_cancel_requested(job_id):
+                raise BacktestCancelled("用户已停止回测")
+            run_request = request.model_copy(
+                update={
+                    "timeframe": timeframe,
+                    "timeframe_mode": "single" if not matrix_mode else "matrix",
+                    "timeframes": requested_timeframes if matrix_mode else None,
+                }
+            )
+            report = backtrader_engine.run_strategy(
+                strategy_class=strategy_class,
+                exchange=run_request.exchange,
+                symbol=symbols[0],
+                symbols=symbols,
+                timeframe=timeframe,
+                start_date=run_request.start_date,
+                end_date=run_request.end_date,
+                initial_capital=run_request.initial_capital,
+                commission=run_request.commission,
+                slippage=run_request.slippage,
+                strategy_config=_strategy_config_for_backtest(db_config, timeframe),
+                progress_hook=progress_hook,
+                cancel_check=lambda: _is_backtest_cancel_requested(job_id),
+            )
+            completed_bars_before_current_run += int(report.total_bars or 0)
+            total_bars_across_runs += int(report.total_bars or 0)
+            response = _backtest_report_to_response(
+                report, request.strategy_id, strategy_name, run_request
+            )
+            matrix_responses.append(response.model_dump(mode="json"))
+            if primary_report is None or _safe_float(report.total_return_pct) >= _safe_float(primary_report.total_return_pct):
+                primary_report = report
+                primary_request = run_request
+        if primary_report is None or primary_request is None:
+            raise ValueError("没有可执行的回测周期")
+        report = primary_report
+        request = primary_request
+    except ValueError as e:
+        _update_backtest_job(
+            job_id,
+            status="failed",
+            error_message=str(e),
+        )
+        return
+    except BacktestCancelled:
+        _update_backtest_job(
+            job_id,
+            status="cancelled",
+            message="用户已停止回测",
+            error_message=None,
+        )
+        return
+    except Exception as e:
+        logger.exception("backtest job %s failed", job_id)
+        _update_backtest_job(
+            job_id,
+            status="failed",
+            error_message=str(e),
+        )
+        return
+    else:
+        response = _backtest_report_to_response(
+            report, request.strategy_id, strategy_name, request
+        )
+        if matrix_mode:
+            response.timeframe_mode = "matrix"
+            response.matrix_results = matrix_responses
+        result_dict = response.model_dump(mode="json")
+        if report.status == "completed":
+            _save_report_to_db(
+                report,
+                request.strategy_id,
+                response.trades or [],
+                request.start_date,
+                request.end_date,
+                request.initial_capital,
+                timeframe=response.timeframe,
+                timeframe_mode=response.timeframe_mode,
+                matrix_results=response.matrix_results,
+                result_payload=result_dict,
+            )
+
+        _update_backtest_job(
+            job_id,
+            status=report.status,
+            current_bar=report.total_bars,
+            total_bars=report.total_bars,
+            result_json=json.dumps(result_dict, ensure_ascii=False),
+            error_message=report.error_message if report.status == "failed" else None,
+        )
+    finally:
+        _clear_backtest_cancel(job_id)
+        _clear_backtest_active(job_id)
+
+
+async def _run_backtest_job_task(job_id: str, payload: Dict[str, Any]) -> None:
+    await asyncio.to_thread(_run_backtest_job_worker, job_id, payload)
+
+
+def _job_row_to_response(row) -> Dict[str, Any]:
+    d = {k: row[k] for k in row.keys()}
+    request = None
+    request_json = d.get("request_json")
+    if request_json:
+        try:
+            request = json.loads(request_json)
+        except json.JSONDecodeError:
+            request = None
+    tb = int(d.get("total_bars") or 0)
+    cb = int(d.get("current_bar") or 0)
+    pct = round(100.0 * min(cb, tb) / tb, 2) if tb > 0 else None
+    status = str(d["status"] or "")
+    resumable = status in _RESUMABLE_BACKTEST_STATUSES and not _is_backtest_active(str(d["job_id"]))
+    response = {
+        "job_id": d["job_id"],
+        "strategy_id": d["strategy_id"],
+        "status": status,
+        "current_bar": cb,
+        "total_bars": tb,
+        "percent": pct,
+        "message": d.get("message"),
+        "request": request,
+        "error_message": d.get("error_message"),
+        "updated_at": str(d.get("updated_at")) if d.get("updated_at") is not None else None,
+        "resumable": resumable,
+    }
+    if "result_json" in d:
+        result = None
+        rj = d.get("result_json")
+        if rj:
+            try:
+                result = json.loads(rj)
+            except json.JSONDecodeError:
+                result = None
+        response["result"] = result
+    return response
+
+
+_BACKTEST_MATRIX_LIST_FIELDS = {
+    "timeframe",
+    "status",
+    "initial_capital",
+    "final_capital",
+    "total_return",
+    "annual_return",
+    "max_drawdown",
+    "sharpe_ratio",
+    "win_rate",
+    "profit_factor",
+    "total_trades",
+}
+
+
+def _backtest_matrix_result_list_summary(item: Any) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    return {key: item.get(key) for key in _BACKTEST_MATRIX_LIST_FIELDS if key in item}
+
+
+def _backtest_result_row_to_response(row, *, include_matrix_detail: bool = True) -> Dict[str, Any]:
+    result = dict(row)
+    matrix_results_json = result.pop("matrix_results_json", None)
+    result.pop("result_json", None)
+    if matrix_results_json:
+        try:
+            matrix_results = json.loads(matrix_results_json)
+        except json.JSONDecodeError:
+            matrix_results = []
+    else:
+        matrix_results = []
+
+    if include_matrix_detail:
+        result["matrix_results"] = matrix_results
+    else:
+        result["matrix_results"] = [
+            summary
+            for item in matrix_results
+            if (summary := _backtest_matrix_result_list_summary(item))
+        ]
+        if matrix_results and not result["matrix_results"]:
+            result["matrix_results"] = [
+                {"timeframe": item.get("timeframe")}
+                for item in matrix_results
+                if isinstance(item, dict) and item.get("timeframe")
+            ]
+    if not result.get("matrix_results"):
+        result["matrix_results"] = []
+    return result
+
+
+def _backtest_results_order_sql(sort_by: str, sort_dir: str) -> str:
+    direction = "ASC" if sort_dir == "asc" else "DESC"
+    tie_direction = direction if sort_by == "created" else "DESC"
+    if sort_by == "return":
+        return f"br.total_return IS NULL ASC, br.total_return {direction}, br.created_at DESC, br.id DESC"
+    if sort_by == "drawdown":
+        return f"br.max_drawdown IS NULL ASC, br.max_drawdown {direction}, br.created_at DESC, br.id DESC"
+    if sort_by == "win_rate":
+        return f"br.win_rate IS NULL ASC, br.win_rate {direction}, br.created_at DESC, br.id DESC"
+    return f"br.created_at {direction}, br.id {tie_direction}"
+
+
+def _backtest_results_search_sql(search: str | None) -> tuple[list[str], list[Any]]:
+    tokens = [token for token in (search or "").strip().lower().split() if token]
+    if not tokens:
+        return [], []
+    fields = [
+        "CAST(br.id AS TEXT)",
+        "CAST(br.strategy_id AS TEXT)",
+        "LOWER(COALESCE(br.start_date, ''))",
+        "LOWER(COALESCE(br.end_date, ''))",
+        "LOWER(COALESCE(br.timeframe, ''))",
+        "LOWER(COALESCE(br.timeframe_mode, ''))",
+        "LOWER(COALESCE(br.status, ''))",
+        "LOWER(COALESCE(s.name, ''))",
+        "LOWER(COALESCE(s.description, ''))",
+        "LOWER(COALESCE(s.symbols, ''))",
+        "LOWER(COALESCE(s.config, ''))",
+    ]
+    clauses: list[str] = []
+    params: list[Any] = []
+    for token in tokens:
+        pattern = f"%{token}%"
+        clauses.append(f"({' OR '.join(f'{field} LIKE ?' for field in fields)})")
+        params.extend([pattern] * len(fields))
+    return clauses, params
+
+
+# ============================================
+# API 端点
+# ============================================
+
+# ============================================
+# 新架构 BaseStrategy 回测请求/响应
+# ============================================
+
+class NewBacktestRequest(BaseModel):
+    """BaseStrategy 子类回测请求"""
+    strategy_name: str = "kairos_30m_horizon_dca"
+    exchange: str = "okx"
+    symbol: str = "BTC/USDT"
+    timeframe: str = "1m"
+    start_date: str = "2026-03-01"
+    end_date: str = "2026-04-20"
+    initial_capital: float = 10000
+    commission: float = 0.0004
+    slippage: float = 0.0001
+    config: Optional[Dict[str, Any]] = None
+
+
+def _report_to_dict(report: BacktestReport) -> Dict[str, Any]:
+    """将 BacktestReport dataclass 转为 JSON-friendly dict。"""
+    d = asdict(report)
+    for key in ("total_return_pct", "annual_return_pct", "max_drawdown_pct",
+                "sharpe_ratio", "sortino_ratio", "calmar_ratio", "win_rate_pct",
+                "profit_factor", "total_fees", "avg_holding_bars", "elapsed_seconds"):
+        v = d.get(key)
+        if v is not None and isinstance(v, float):
+            if np.isnan(v) or np.isinf(v):
+                d[key] = 0.0
+    return d
+
+
+@router.post("/run_new")
+async def run_new_backtest(request: NewBacktestRequest):
+    """
+    运行新架构 BaseStrategy 子类回测。
+
+    返回 JSON 报告，包含：
+    - 基础指标（收益率/回撤/夏普/胜率等）
+    - equity_curve 数组（前端可直接喂 ECharts）
+    - trades 逐笔交易明细
+    """
+    _validate_backtest_date_range(request.start_date, request.end_date)
+    _ensure_new_registry()
+
+    strategy_class = _NEW_STRATEGY_REGISTRY.get(request.strategy_name)
+    if not strategy_class:
+        available = list(_NEW_STRATEGY_REGISTRY.keys())
+        raise HTTPException(
+            status_code=400,
+            detail=f"策略 '{request.strategy_name}' 未注册。可用策略: {available}",
+        )
+
+    try:
+        report = await asyncio.to_thread(
+            backtrader_engine.run_strategy,
+            strategy_class=strategy_class,
+            exchange=request.exchange,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            initial_capital=request.initial_capital,
+            commission=request.commission,
+            slippage=request.slippage,
+            strategy_config=request.config,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("run_new_backtest failed")
+        raise HTTPException(status_code=500, detail=f"回测执行异常: {e}")
+
+    return _report_to_dict(report)
+
+
+@router.get("/new_strategies")
+async def list_new_strategies():
+    """列出所有可用的新架构 BaseStrategy 策略。"""
+    _ensure_new_registry()
+    return [
+        {"name": name, "class": cls.__name__}
+        for name, cls in _NEW_STRATEGY_REGISTRY.items()
+    ]
+
+
+# ============================================
+# 按 strategy_id 回测（与实盘同一 BaseStrategy 解析）
+# ============================================
+
+@router.post("/run_sync", response_model=BacktestResultResponse)
+async def run_backtest_sync(request: BacktestRequest):
+    """运行回测 (同步)，仅 BaseStrategy 路径。"""
+    _validate_backtest_date_range(request.start_date, request.end_date)
+    strategy_info = get_strategy_for_id(request.strategy_id)
+    if not strategy_info:
+        keys = sorted(get_base_strategy_registry().keys())
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"策略 #{request.strategy_id} 无法解析为 BaseStrategy。"
+                f"请补全 config.strategy_key、执行 python scripts/repair_strategy_keys.py，"
+                f"或删除废弃行后重新导入 data/seed/strategies.json。"
+                f" 已注册的键: {keys}。"
+            ),
+        )
+
+    strategy_name = strategy_info.get("name", "")
+    strategy_class = strategy_info["strategy_class"]
+    db_config = strategy_info.get("db_config") or {}
+    request = _request_with_strategy_timeframe(request, strategy_info)
+    request = _strategy_cost_request_for_backtest(request, strategy_info)
+    symbols = _strategy_symbols_for_backtest(strategy_info, request)
+    strategy_config = _strategy_config_for_backtest(db_config, request.timeframe or "1h")
+    try:
+        report = await asyncio.to_thread(
+            backtrader_engine.run_strategy,
+            strategy_class=strategy_class,
+            exchange=request.exchange,
+            symbol=symbols[0],
+            symbols=symbols,
+            timeframe=request.timeframe,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            initial_capital=request.initial_capital,
+            commission=request.commission,
+            slippage=request.slippage,
+            strategy_config=strategy_config,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    response = _backtest_report_to_response(
+        report, request.strategy_id, strategy_name, request
+    )
+    result_dict = response.model_dump(mode="json")
+    if report.status == "completed":
+        _save_report_to_db(
+            report,
+            request.strategy_id,
+            response.trades or [],
+            request.start_date,
+            request.end_date,
+            request.initial_capital,
+            timeframe=response.timeframe,
+            timeframe_mode=response.timeframe_mode,
+            matrix_results=response.matrix_results,
+            result_payload=result_dict,
+        )
+    return response
+
+
+@router.post("/run")
+async def run_backtest(request: BacktestRequest):
+    """
+    运行回测 (异步) — 实际上 v2 引擎很快，直接同步返回
+    """
+    return await run_backtest_sync(request)
+
+
+@router.post("/run_job")
+async def start_backtest_job(
+    request: Request,
+    payload: BacktestRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    异步回测：立即返回 job_id，进度写入 SQLite ``backtest_jobs``。
+    前端可轮询 ``GET /backtest/job/{job_id}``；进程重启后运行中任务会标为 interrupted，
+    仍可读取最后一次 current_bar / total_bars。
+    """
+    auth = _auth_context(request)
+    try:
+        _auth_service_for_request(request).check_guest_backtest_quota(
+            auth,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    _validate_backtest_date_range(payload.start_date, payload.end_date)
+    strategy_info = get_strategy_for_id(payload.strategy_id)
+    if not strategy_info:
+        keys = sorted(get_base_strategy_registry().keys())
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"策略 #{payload.strategy_id} 无法解析为 BaseStrategy。"
+                f"请补全 config.strategy_key、执行 python scripts/repair_strategy_keys.py，"
+                f"或删除废弃行后重新导入 data/seed/strategies.json。"
+                f" 已注册的键: {keys}。"
+            ),
+        )
+
+    payload = _request_with_strategy_timeframe(payload, strategy_info)
+    payload = _strategy_cost_request_for_backtest(payload, strategy_info)
+    job_id = str(uuid.uuid4())
+    _insert_backtest_job(
+        job_id,
+        payload.strategy_id,
+        payload,
+        owner_role=auth.get("role"),
+        owner_session_id=auth.get("session_id"),
+        owner_guest_code_id=auth.get("guest_code_id"),
+    )
+    _try_mark_backtest_active(job_id)
+    background_tasks.add_task(_run_backtest_job_task, job_id, payload.model_dump())
+    return {"job_id": job_id}
+
+
+@router.get("/jobs")
+async def get_backtest_jobs(
+    request: Request,
+    strategy_id: Optional[int] = Query(None, description="策略ID"),
+    status: Optional[str] = Query(None, description="任务状态"),
+    limit: int = Query(50, ge=1, le=200),
+    include_result: bool = Query(False, description="是否返回完整任务结果"),
+):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    conditions: List[str] = []
+    params: List[Any] = []
+    if strategy_id is not None:
+        conditions.append("strategy_id = ?")
+        params.append(strategy_id)
+    if status:
+        statuses = [item.strip() for item in status.split(",") if item.strip()]
+        if statuses:
+            conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
+            params.extend(statuses)
+    auth = _auth_context(request)
+    if auth.get("role") == "guest":
+        conditions.append("owner_session_id = ?")
+        params.append(auth.get("session_id"))
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    result_column = ", result_json" if include_result else ""
+    cursor.execute(
+        f"""
+        SELECT job_id, strategy_id, request_json, status, current_bar, total_bars,
+               message, error_message, updated_at, owner_role, owner_session_id,
+               owner_guest_code_id{result_column}
+        FROM backtest_jobs
+        {where_sql}
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        [*params, limit],
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [_job_row_to_response(row) for row in rows]
+
+
+@router.get("/job/{job_id}")
+async def get_backtest_job_status(job_id: str, request: Request):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT job_id, strategy_id, status, current_bar, total_bars, message,
+               result_json, error_message, updated_at, owner_role, owner_session_id,
+               owner_guest_code_id
+        FROM backtest_jobs WHERE job_id = ?
+        """,
+        (job_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="回测任务不存在")
+    _ensure_backtest_job_access(row, _auth_context(request))
+    return _job_row_to_response(row)
+
+
+@router.post("/job/{job_id}/cancel")
+async def cancel_backtest_job(job_id: str, request: Request):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT job_id, strategy_id, status, current_bar, total_bars, message,
+               result_json, error_message, updated_at, owner_role, owner_session_id,
+               owner_guest_code_id
+        FROM backtest_jobs WHERE job_id = ?
+        """,
+        (job_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="回测任务不存在")
+    _ensure_backtest_job_access(row, _auth_context(request))
+
+    status = str(row["status"] or "")
+    if status in _TERMINAL_BACKTEST_STATUSES:
+        conn.close()
+        _clear_backtest_cancel(job_id)
+        return _job_row_to_response(row)
+    if status not in _CANCELLABLE_BACKTEST_STATUSES:
+        conn.close()
+        raise HTTPException(status_code=409, detail=f"当前回测状态不可停止: {status}")
+
+    _request_backtest_cancel(job_id)
+    cursor.execute(
+        """
+        UPDATE backtest_jobs
+        SET status = 'cancelling',
+            message = '用户请求停止回测，正在安全结束',
+            updated_at = datetime('now')
+        WHERE job_id = ?
+        """,
+        (job_id,),
+    )
+    conn.commit()
+    cursor.execute(
+        """
+        SELECT job_id, strategy_id, status, current_bar, total_bars, message,
+               result_json, error_message, updated_at, owner_role, owner_session_id,
+               owner_guest_code_id
+        FROM backtest_jobs WHERE job_id = ?
+        """,
+        (job_id,),
+    )
+    updated = cursor.fetchone()
+    conn.close()
+    return _job_row_to_response(updated)
+
+
+@router.post("/job/{job_id}/resume")
+async def resume_backtest_job(job_id: str, request: Request, background_tasks: BackgroundTasks):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT job_id, strategy_id, request_json, status, current_bar, total_bars,
+               message, result_json, error_message, updated_at, owner_role,
+               owner_session_id, owner_guest_code_id
+        FROM backtest_jobs WHERE job_id = ?
+        """,
+        (job_id,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="回测任务不存在")
+    _ensure_backtest_job_access(row, _auth_context(request))
+
+    status = str(row["status"] or "")
+    if _is_backtest_active(job_id):
+        return _job_row_to_response(row)
+    if status == "completed":
+        raise HTTPException(status_code=409, detail="回测任务已完成，无需继续")
+    if status == "cancelled":
+        raise HTTPException(status_code=409, detail="回测任务已停止，请重新创建回测")
+    if status not in _RESUMABLE_BACKTEST_STATUSES:
+        raise HTTPException(status_code=409, detail=f"当前回测状态不可继续: {status}")
+
+    try:
+        payload = json.loads(row["request_json"] or "{}")
+        request = BacktestRequest(**payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"回测任务参数损坏，无法继续: {exc}") from exc
+
+    _validate_backtest_date_range(request.start_date, request.end_date)
+    if not _try_mark_backtest_active(job_id):
+        return _job_row_to_response(row)
+
+    _clear_backtest_cancel(job_id)
+    _update_backtest_job(
+        job_id,
+        status="pending",
+        current_bar=0,
+        total_bars=0,
+        message="已继续回测，正在重新排队执行",
+        result_json=None,
+        error_message=None,
+    )
+    background_tasks.add_task(_run_backtest_job_task, job_id, request.model_dump())
+
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT job_id, strategy_id, status, current_bar, total_bars, message,
+               result_json, error_message, updated_at, owner_role, owner_session_id,
+               owner_guest_code_id
+        FROM backtest_jobs WHERE job_id = ?
+        """,
+        (job_id,),
+    )
+    updated = cursor.fetchone()
+    conn.close()
+    return _job_row_to_response(updated)
+
+
+@router.get("/strategies")
+async def get_available_strategies():
+    """已注册的 BaseStrategy strategy_key → 类名（用于调试/兼容）。"""
+    return list_backtestable_registry_keys()
+
+
+@router.get("/status/{strategy_id}")
+async def get_backtest_status(strategy_id: int):
+    """获取回测状态 (兼容旧接口)"""
+    return {"strategy_id": strategy_id, "status": "completed", "message": "v2引擎为同步执行"}
+
+
+@router.get("/results")
+async def get_backtest_results(
+    strategy_id: int = Query(None, description="策略ID"),
+    q: str = Query("", description="按策略名、标的、周期、状态、日期模糊搜索"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0, description="分页偏移"),
+    include_matrix_summary: bool = Query(True, description="是否返回矩阵回测摘要"),
+    sort_by: Literal["created", "return", "drawdown", "win_rate"] = Query("created", description="排序字段"),
+    sort_dir: Literal["asc", "desc"] = Query("desc", description="排序方向"),
+):
+    """获取回测结果列表 (从数据库)"""
+    conn = db.get_connection()
+    cursor = conn.cursor()
+
+    matrix_column = "matrix_results_json" if include_matrix_summary else "NULL AS matrix_results_json"
+    order_sql = _backtest_results_order_sql(sort_by, sort_dir)
+    where_clauses: list[str] = []
+    params: list[Any] = []
+    if strategy_id:
+        where_clauses.append("br.strategy_id = ?")
+        params.append(strategy_id)
+    search_clauses, search_params = _backtest_results_search_sql(q)
+    where_clauses.extend(search_clauses)
+    params.extend(search_params)
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    cursor.execute(f'''
+        SELECT br.id, br.strategy_id, br.start_date, br.end_date, br.initial_capital, br.final_capital,
+               br.total_return, br.annual_return, br.max_drawdown, br.sharpe_ratio, br.win_rate,
+               br.profit_factor, br.total_trades, br.timeframe, br.timeframe_mode,
+               {matrix_column}, br.status, br.created_at
+        FROM backtest_results br
+        LEFT JOIN strategies s ON s.id = br.strategy_id
+        {where_sql}
+        ORDER BY {order_sql} LIMIT ? OFFSET ?
+    ''', (*params, limit, offset))
+
+    rows = cursor.fetchall()
+    conn.close()
+    return [_backtest_result_row_to_response(row, include_matrix_detail=False) for row in rows]
+
+
+@router.get("/result/{backtest_id}")
+async def get_backtest_result(backtest_id: int):
+    """获取回测结果详情"""
+    conn = db.get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT id, strategy_id, start_date, end_date, initial_capital, final_capital,
+               total_return, annual_return, max_drawdown, sharpe_ratio, win_rate,
+               profit_factor, total_trades, trades_detail, timeframe, timeframe_mode,
+               matrix_results_json, result_json, status, created_at
+        FROM backtest_results WHERE id = ?
+    ''', (backtest_id,))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Backtest result not found")
+
+    row_dict = dict(row)
+    result_json = row_dict.get("result_json")
+    result = _backtest_result_row_to_response(row)
+    if result_json:
+        try:
+            full_result = json.loads(result_json)
+        except json.JSONDecodeError:
+            full_result = None
+        if isinstance(full_result, dict):
+            full_result["id"] = result.get("id")
+            full_result["created_at"] = result.get("created_at")
+            full_result["status"] = result.get("status") or full_result.get("status")
+            full_result["timeframe"] = result.get("timeframe") or full_result.get("timeframe")
+            full_result["timeframe_mode"] = result.get("timeframe_mode") or full_result.get("timeframe_mode")
+            if not full_result.get("matrix_results"):
+                full_result["matrix_results"] = result.get("matrix_results", [])
+            return full_result
+
+    if result.get('trades_detail'):
+        result['trades'] = json.loads(result['trades_detail'])
+        del result['trades_detail']
+
+    return result
+
+
+@router.delete("/result/{backtest_id}")
+async def delete_backtest_result(backtest_id: int):
+    """删除一条已落库回测历史；不影响策略、K 线缓存或回测 job。"""
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM backtest_results WHERE id = ?", (backtest_id,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    if deleted <= 0:
+        raise HTTPException(status_code=404, detail="Backtest result not found")
+    return {"deleted": True, "id": backtest_id}

@@ -1,0 +1,1900 @@
+import axios, { type AxiosError, type AxiosRequestConfig } from 'axios';
+import type {
+  Ticker,
+  Kline,
+  TechnicalIndicators,
+  OrderBook,
+  FundingRate,
+  FundingOpportunity,
+  Strategy,
+} from '../types';
+
+const API_BASE = '/api/v2';
+
+/** 默认 REST 超时（秒） */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * 批量/自定义数据同步：后端在单次 HTTP 内顺序拉取 K 线（1m + 长区间可达数万～数十万根），
+ * 必须显著大于默认 30s，否则会误报「启动失败: timeout」而任务实际仍在跑或刚失败。
+ */
+const DATA_SYNC_LONG_TIMEOUT_MS = 3_600_000; // 60 分钟
+
+/**
+ * POST /backtest/run_sync：Backtrader 整条链路跑完才返回；含 Kairos 时每根 bar 可能触发推理，
+ * 1m + 长日期区间极易超过默认 30s。
+ */
+const BACKTEST_RUN_SYNC_TIMEOUT_MS = 3_600_000; // 60 分钟
+
+const api = axios.create({
+  baseURL: API_BASE,
+  timeout: DEFAULT_TIMEOUT_MS,
+  withCredentials: true,
+});
+
+function extractApiErrorDetail(data: unknown): unknown {
+  if (!data) return undefined;
+  if (typeof data === 'string') return data.slice(0, 500);
+  if (typeof data !== 'object') return data;
+
+  const record = data as Record<string, unknown>;
+  return record.detail ?? record.message ?? record.error ?? data;
+}
+
+function describeApiError(error: AxiosError | Error | unknown): Record<string, unknown> {
+  if (axios.isAxiosError(error)) {
+    const method = String(error.config?.method || 'GET').toUpperCase();
+    const baseURL = error.config?.baseURL || '';
+    const url = error.config?.url || '';
+
+    return {
+      method,
+      url: `${baseURL}${url}`,
+      status: error.response?.status,
+      code: error.code,
+      message: error.message,
+      detail: extractApiErrorDetail(error.response?.data),
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      name: error.name,
+    };
+  }
+
+  return {
+    message: String(error),
+  };
+}
+
+api.interceptors.response.use(
+  (response) => response.data,
+  (error) => {
+    console.error('API Error:', describeApiError(error));
+    return Promise.reject(error);
+  }
+);
+
+function snakeToCamel(input: string): string {
+  return input.replace(/_([a-z])/g, (_, s: string) => s.toUpperCase());
+}
+
+function camelToSnake(input: string): string {
+  return input.replace(/[A-Z]/g, (s) => `_${s.toLowerCase()}`);
+}
+
+function camelizeDeep<T = any>(value: any): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => camelizeDeep(item)) as T;
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value).reduce((acc, [key, val]) => {
+      acc[snakeToCamel(key)] = camelizeDeep(val);
+      return acc;
+    }, {} as Record<string, any>) as T;
+  }
+  return value as T;
+}
+
+function snakifyDeep<T = any>(value: any): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => snakifyDeep(item)) as T;
+  }
+  if (value && typeof value === 'object' && !(value instanceof FormData)) {
+    return Object.entries(value).reduce((acc, [key, val]) => {
+      acc[camelToSnake(key)] = snakifyDeep(val);
+      return acc;
+    }, {} as Record<string, any>) as T;
+  }
+  return value as T;
+}
+
+function unwrapEnvelope(raw: any): any {
+  if (raw && typeof raw === 'object' && 'success' in raw && 'data' in raw) {
+    return raw.data;
+  }
+  return raw;
+}
+
+export type AuthRole = 'admin' | 'guest' | null;
+
+export interface AuthSession {
+  authEnabled: boolean;
+  authenticated: boolean;
+  role: AuthRole;
+  permissions: string[];
+  expiresAt?: string;
+  sessionId?: string;
+  guestCodeId?: number;
+  maxBacktestsPerDay?: number;
+  maxConcurrentBacktests?: number;
+  maxBacktestDays?: number;
+}
+
+export interface GuestAccessCode {
+  id: number;
+  note: string;
+  expiresAt: string;
+  maxBacktestsPerDay: number;
+  maxConcurrentBacktests: number;
+  maxBacktestDays: number;
+  createdBy?: string;
+  createdAt?: string;
+  lastUsedAt?: string | null;
+  revokedAt?: string | null;
+}
+
+export interface CreatedGuestAccessCode extends GuestAccessCode {
+  code: string;
+}
+
+export interface GuestCodeCreateInput {
+  note?: string;
+  expiresInMinutes?: number;
+  maxBacktestsPerDay?: number;
+  maxConcurrentBacktests?: number;
+  maxBacktestDays?: number;
+}
+
+async function getReq<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
+  const normalized = config ? { ...config, params: snakifyDeep(config.params) } : undefined;
+  const raw = await api.get(url, normalized);
+  return camelizeDeep<T>(unwrapEnvelope(raw));
+}
+
+async function postReq<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+  const normalized = config ? { ...config, params: snakifyDeep(config.params) } : undefined;
+  const raw = await api.post(url, snakifyDeep(data), normalized);
+  return camelizeDeep<T>(unwrapEnvelope(raw));
+}
+
+async function putReq<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+  const normalized = config ? { ...config, params: snakifyDeep(config.params) } : undefined;
+  const raw = await api.put(url, snakifyDeep(data), normalized);
+  return camelizeDeep<T>(unwrapEnvelope(raw));
+}
+
+async function deleteReq<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
+  const normalized = config ? { ...config, params: snakifyDeep(config.params) } : undefined;
+  const raw = await api.delete(url, normalized);
+  return camelizeDeep<T>(unwrapEnvelope(raw));
+}
+
+// ============================================
+// 认证 API
+// ============================================
+
+export const authApi = {
+  me: (): Promise<AuthSession> => getReq('/auth/me'),
+
+  adminLogin: (username: string, password: string): Promise<AuthSession> =>
+    postReq('/auth/admin/login', { username, password }),
+
+  guestLogin: (code: string): Promise<AuthSession> =>
+    postReq('/auth/guest/login', { code }),
+
+  logout: (): Promise<{ loggedOut: boolean }> => postReq('/auth/logout'),
+
+  listGuestCodes: (): Promise<{ items: GuestAccessCode[] }> =>
+    getReq('/auth/guest-codes'),
+
+  createGuestCode: (data: GuestCodeCreateInput): Promise<CreatedGuestAccessCode> =>
+    postReq('/auth/guest-codes', data),
+
+  revokeGuestCode: (codeId: number): Promise<{ id: number; revokedAt: string }> =>
+    deleteReq(`/auth/guest-codes/${codeId}`),
+};
+
+// ============================================
+// 信号中心 API
+// ============================================
+
+export interface SignalDelivery {
+  id: number;
+  signalId: number;
+  channelId: number;
+  status: 'pending' | 'approved' | 'sent' | 'failed' | 'expired' | 'canceled';
+  requestPayload?: Record<string, unknown>;
+  responseStatus?: number | null;
+  responseBody?: string | null;
+  error?: string | null;
+  attempts: number;
+  approvedAt?: string | null;
+  sentAt?: string | null;
+  updatedAt: string;
+}
+
+export interface StrategySignal {
+  id: number;
+  signalUid: string;
+  strategyId: number;
+  strategyName?: string;
+  symbol: string;
+  okxInstId: string;
+  marketType: 'swap';
+  action: 'ENTER_LONG' | 'ENTER_SHORT' | 'EXIT_LONG' | 'EXIT_SHORT';
+  price: number;
+  suggestedInvestmentType: 'margin' | 'percentage_balance' | 'percentage_position';
+  suggestedAmount: number;
+  reason?: string;
+  confidence?: string;
+  riskNote?: string;
+  status: 'pending_approval' | 'sent' | 'failed' | 'expired' | 'canceled';
+  rawContext?: Record<string, unknown>;
+  okxPayloadPreview: Record<string, unknown>;
+  deliveries?: SignalDelivery[];
+  createdAt: string;
+  expiresAt: string;
+  updatedAt: string;
+}
+
+export interface SignalChannel {
+  id: number;
+  name: string;
+  enabled: boolean;
+  webhookUrl?: string;
+  maskedWebhookUrl: string;
+  maskedSignalToken: string;
+  allowedStrategyIds: number[];
+  allowedSymbols: string[];
+  allowedActions: string[];
+  maxMarginUsdt?: number | null;
+  maxLagSec: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SignalStrategySetting {
+  strategyId: number;
+  strategyName: string;
+  signalEnabled: boolean;
+  manualApprovalRequired: boolean;
+  status?: string;
+  exchange?: string;
+  symbols?: string[];
+  marketType?: string;
+  totalPnl?: number | null;
+  returnPct?: number | null;
+  updatedAt?: string | null;
+}
+
+export interface SignalChannelInput {
+  name: string;
+  webhookUrl: string;
+  signalToken: string;
+  enabled?: boolean;
+  allowedStrategyIds?: number[];
+  allowedSymbols?: string[];
+  allowedActions?: string[];
+  maxMarginUsdt?: number | null;
+  maxLagSec?: number;
+}
+
+export interface SignalChannelTestInput {
+  send?: boolean;
+  action?: string;
+  instrument?: string;
+  investmentType?: string;
+  amount?: number;
+}
+
+export interface SignalChannelTestResult {
+  status: 'dry_run' | 'sent' | 'failed';
+  payload?: Record<string, unknown>;
+  responseStatus?: number | null;
+  responseBody?: string | null;
+  channel?: SignalChannel;
+}
+
+export const signalCenterApi = {
+  listSignals: (params?: {
+    status?: string;
+    strategyId?: number;
+    channelId?: number;
+    limit?: number;
+  }): Promise<{ signals: StrategySignal[] }> => getReq('/signals', { params }),
+
+  approveSignal: (signalId: number, channelIds: number[]): Promise<StrategySignal> =>
+    postReq(`/signals/${signalId}/approve`, { channelIds }),
+
+  cancelSignal: (signalId: number): Promise<StrategySignal> =>
+    postReq(`/signals/${signalId}/cancel`),
+
+  retrySignal: (signalId: number): Promise<StrategySignal> =>
+    postReq(`/signals/${signalId}/retry`),
+
+  listChannels: (): Promise<{ channels: SignalChannel[] }> => getReq('/signal-channels'),
+
+  listSignalStrategies: (): Promise<{ strategies: SignalStrategySetting[] }> =>
+    getReq('/signal-strategies'),
+
+  setStrategySignalEnabled: (
+    strategyId: number,
+    enabled: boolean
+  ): Promise<{ strategy: SignalStrategySetting }> =>
+    putReq(`/signal-strategies/${strategyId}`, { enabled }),
+
+  updateSignalStrategySettings: (
+    strategyId: number,
+    payload: { enabled?: boolean; manualApprovalRequired?: boolean }
+  ): Promise<{ strategy: SignalStrategySetting }> =>
+    putReq(`/signal-strategies/${strategyId}`, payload),
+
+  createChannel: (payload: SignalChannelInput): Promise<{ channel: SignalChannel }> =>
+    postReq('/signal-channels', payload),
+
+  updateChannel: (
+    channelId: number,
+    payload: Partial<SignalChannelInput>
+  ): Promise<{ channel: SignalChannel }> =>
+    putReq(`/signal-channels/${channelId}`, payload),
+
+  deleteChannel: (
+    channelId: number
+  ): Promise<{ deleted: boolean; channelId: number; channelName: string; canceledDeliveries: number }> =>
+    deleteReq(`/signal-channels/${channelId}`),
+
+  testChannel: (
+    channelId: number,
+    payload: SignalChannelTestInput = {}
+  ): Promise<SignalChannelTestResult> =>
+    postReq(`/signal-channels/${channelId}/test`, { send: false, ...payload }),
+};
+
+// ============================================
+// 实盘工作台 API
+// ============================================
+
+export interface LiveExecutionStrategy {
+  strategyId: number;
+  strategyName: string;
+  added: boolean;
+  deployable: boolean;
+  deployed: boolean;
+  liveSubscriptionId?: number | null;
+  deploymentStrategyId?: number | null;
+  deploymentStrategyName?: string | null;
+  deploymentStatus?: string | null;
+  status?: string;
+  workspaceStatus?: string;
+  exchange?: string;
+  accountId?: string;
+  accountIds?: string[];
+  accountBindings?: LiveExecutionAccountBinding[];
+  symbols?: string[];
+  tradeSymbols?: string[];
+  marketType?: string;
+  riskConfig?: Record<string, unknown>;
+  totalPnl?: number | null;
+  returnPct?: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface LiveExecutionAccountBinding {
+  accountId: string;
+  accountName?: string;
+  exchange?: string;
+  exchangeAlias?: string;
+  maskedApiKey?: string | null;
+  testnet?: boolean;
+  added: boolean;
+  deployed: boolean;
+  liveSubscriptionId?: number | null;
+  deploymentStrategyId?: number | null;
+  deploymentStatus?: string | null;
+  status?: string | null;
+  riskConfig?: Record<string, unknown>;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface LiveExecutionPreflightCheck {
+  item: string;
+  passed: boolean;
+  detail?: string | null;
+  account?: Record<string, unknown> | null;
+}
+
+export interface LiveExecutionPreflight {
+  allPassed: boolean;
+  checks: LiveExecutionPreflightCheck[];
+  plan?: Record<string, unknown>;
+  account?: Record<string, unknown> | null;
+}
+
+export interface LiveExecutionOrder {
+  id?: string;
+  clientOrderId?: string | null;
+  instrumentId?: string | null;
+  instrumentType?: string | null;
+  symbol?: string;
+  side?: string;
+  positionSide?: string | null;
+  positionDirection?: string | null;
+  positionEffect?: string | null;
+  reduceOnly?: boolean | null;
+  tdMode?: string | null;
+  type?: string;
+  price?: number | null;
+  average?: number | null;
+  amount?: number | null;
+  filled?: number | null;
+  remaining?: number | null;
+  fillPrice?: number | null;
+  fillSize?: number | null;
+  fillTimestamp?: number | null;
+  fillDatetime?: string | null;
+  tradeId?: string | null;
+  createdTimestamp?: number | null;
+  createdDatetime?: string | null;
+  updatedTimestamp?: number | null;
+  updatedDatetime?: string | null;
+  status?: string | null;
+  rawStatus?: string | null;
+  timestamp?: number | null;
+  datetime?: string | null;
+  fee?: number | null;
+  feeCurrency?: string | null;
+  pnl?: number | null;
+  rebate?: number | null;
+  rebateCurrency?: string | null;
+  quantbaseSource?: 'strategy' | 'external';
+  quantbaseSourceLabel?: string | null;
+  sourceStrategyId?: number | null;
+  sourceStrategyName?: string | null;
+  subscriptionId?: number | null;
+  signalEventId?: number | null;
+  liveExecutionId?: number | null;
+  error?: string | null;
+  failureLog?: Record<string, unknown> | null;
+  source?: string;
+  info?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface LiveExecutionPosition {
+  symbol?: string;
+  currency?: string;
+  assetType?: string;
+  side?: string;
+  posSide?: string;
+  amount?: number;
+  free?: number;
+  used?: number;
+  contracts?: number;
+  contractSize?: number | null;
+  baseAmount?: number | null;
+  notional?: number;
+  notionalUsdt?: number;
+  margin?: number | null;
+  initialMargin?: number | null;
+  maintenanceMargin?: number | null;
+  marginRatio?: number | null;
+  marginMode?: string | null;
+  leverage?: number | string | null;
+  percentage?: number | null;
+  unrealizedPnlPct?: number | null;
+  unrealizedPnl?: number;
+  markPrice?: number;
+  entryPrice?: number;
+  liquidationPrice?: number;
+  [key: string]: unknown;
+}
+
+export interface LivePositionCloseResult {
+  accountId: string;
+  exchange: string;
+  closed: number;
+  results: Record<string, unknown>[];
+}
+
+export interface LiveExecutionAccount {
+  accountId: string;
+  name: string;
+  exchange: string;
+  exchangeAlias: string;
+  maskedApiKey?: string | null;
+  displayOnly?: boolean;
+  canTrade?: boolean | null;
+  permissionCheckedAt?: string | null;
+  permissionCheckDetail?: string | null;
+  isDefault: boolean;
+  configured: boolean;
+  enabled: boolean;
+  testnet: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface LiveExecutionAccountReturnRates {
+  oneDay?: number | null;
+  sevenDay?: number | null;
+  thirtyDay?: number | null;
+  source?: string | null;
+  valuationUsd?: number | null;
+  method?: string | null;
+  error?: string | null;
+}
+
+export interface LiveAccountCreateInput {
+  name: string;
+  apiKey: string;
+  apiSecret: string;
+  passphrase?: string;
+  testnet?: boolean;
+}
+
+export const liveExecutionApi = {
+  listAccounts: (): Promise<{ accounts: LiveExecutionAccount[] }> =>
+    getReq('/live/accounts'),
+
+  createAccount: (payload: LiveAccountCreateInput): Promise<{ account: LiveExecutionAccount }> =>
+    postReq('/live/accounts', payload),
+
+  getAccountBalance: (
+    accountId = 'default'
+  ): Promise<{ accountId: string; exchange: string; balance: any[] }> =>
+    getReq(`/live/accounts/${accountId}/balance`),
+
+  getAccountBalanceDetail: (
+    accountId = 'default'
+  ): Promise<{
+    accountId: string;
+    exchange: string;
+    trading: any[];
+    funding: any[];
+    returnRates?: LiveExecutionAccountReturnRates | null;
+  }> =>
+    getReq(`/live/accounts/${accountId}/balance/detail`),
+
+  listStrategies: (): Promise<{ strategies: LiveExecutionStrategy[] }> =>
+    getReq('/live/strategies'),
+
+  updateStrategy: (
+    strategyId: number,
+    payload: { added?: boolean; accountId?: string; bindAccount?: boolean; riskConfig?: Record<string, unknown> }
+  ): Promise<{ strategy: LiveExecutionStrategy }> =>
+    api.patch(`/live/strategies/${strategyId}`, snakifyDeep(payload)).then((raw) =>
+      camelizeDeep(unwrapEnvelope(raw.data))
+    ),
+
+  preflightStrategy: (
+    strategyId: number,
+    payload: {
+      accountId?: string;
+      exchange?: string;
+      initialEquity?: number;
+      loopInterval?: number;
+      startImmediately?: boolean;
+      riskConfig?: Record<string, unknown>;
+    }
+  ): Promise<{ strategy: LiveExecutionStrategy; preflight: LiveExecutionPreflight }> =>
+    postReq(`/live/strategies/${strategyId}/preflight`, payload),
+
+  deployStrategy: (
+    strategyId: number,
+    payload: {
+      accountId?: string;
+      exchange?: string;
+      initialEquity?: number;
+      loopInterval?: number;
+      startImmediately?: boolean;
+      confirmPaperReviewed: boolean;
+      confirmLiveRisk: boolean;
+      riskConfig?: Record<string, unknown>;
+    }
+  ): Promise<{
+    deployed: boolean;
+    started: boolean;
+    sourceStrategyId: number;
+    liveStrategyId?: number | null;
+    liveSubscriptionId?: number | null;
+    strategy: LiveExecutionStrategy;
+    preflight: LiveExecutionPreflight;
+  }> =>
+    postReq(`/live/strategies/${strategyId}/deploy`, payload),
+
+  pauseStrategy: (
+    strategyId: number,
+    payload: { accountId?: string } = {}
+  ): Promise<{ paused: boolean; sourceStrategyId: number; liveSubscriptionId?: number | null; strategy: LiveExecutionStrategy }> =>
+    postReq(`/live/strategies/${strategyId}/pause`, payload),
+
+  resumeStrategy: (
+    strategyId: number,
+    payload: { accountId?: string } = {}
+  ): Promise<{ resumed: boolean; sourceStrategyId: number; liveSubscriptionId?: number | null; strategy: LiveExecutionStrategy }> =>
+    postReq(`/live/strategies/${strategyId}/resume`, payload),
+
+  stopStrategy: (
+    strategyId: number,
+    payload: { accountId?: string } = {}
+  ): Promise<{ stopped: boolean; sourceStrategyId: number; liveSubscriptionId?: number | null; strategy: LiveExecutionStrategy }> =>
+    postReq(`/live/strategies/${strategyId}/stop`, payload),
+
+  listPositions: (
+    accountId = 'default',
+    symbol?: string
+  ): Promise<{ accountId: string; exchange: string; positions: LiveExecutionPosition[] }> =>
+    getReq(`/live/accounts/${accountId}/positions`, { params: { symbol } }),
+
+  closePosition: (
+    accountId = 'default',
+    payload: { symbol?: string; side?: 'long' | 'short'; closeAll?: boolean; confirmLiveRisk: boolean }
+  ): Promise<LivePositionCloseResult> =>
+    postReq(`/live/accounts/${accountId}/positions/close`, payload),
+
+  listOpenOrders: (
+    accountId = 'default',
+    symbol?: string
+  ): Promise<{ accountId: string; exchange: string; orders: LiveExecutionOrder[] }> =>
+    getReq(`/live/accounts/${accountId}/orders/open`, { params: { symbol } }),
+
+  listOrderHistory: (
+    accountId = 'default',
+    symbol?: string,
+    limit = 50
+  ): Promise<{ accountId: string; exchange: string; orders: LiveExecutionOrder[] }> =>
+    getReq(`/live/accounts/${accountId}/orders/history`, { params: { symbol, limit } }),
+};
+
+// ============================================
+// 跨交易所套利 API
+// ============================================
+
+export interface ArbitrageLeg {
+  exchange: string;
+  side?: string;
+  price?: number | null;
+  fundingRate?: number | null;
+}
+
+export interface ArbitrageOpportunity {
+  symbol: string;
+  strategyType?: string;
+  longLeg?: ArbitrageLeg | null;
+  shortLeg?: ArbitrageLeg | null;
+  grossEdgeBps?: number | null;
+  feeBps?: number | null;
+  slippageBps?: number | null;
+  fundingEdgeBps?: number | null;
+  netEdgeBps?: number | null;
+  depthUsdt?: number | null;
+  estimatedMarginUsdt?: number | null;
+  reason?: string | null;
+}
+
+export interface ArbitrageSummary {
+  status: string;
+  asOf?: string;
+  configuredExchanges: Array<Record<string, unknown>>;
+  opportunities: ArbitrageOpportunity[];
+  spreadMatrix: Array<Record<string, unknown>>;
+  fundingRankings: Array<Record<string, unknown>>;
+  portfolioPositions: Array<Record<string, unknown>>;
+  legStatus: Array<Record<string, unknown>>;
+  netExposure: { totalUsdt?: number; bySymbol?: Array<Record<string, unknown>> };
+  pnl: {
+    estimatedUsdt?: number;
+    actualUsdt?: number;
+    fundingUsdt?: number;
+    spreadUsdt?: number;
+    feeUsdt?: number;
+  };
+  emptyReason?: string;
+}
+
+export const arbitrageApi = {
+  getSummary: (): Promise<ArbitrageSummary> =>
+    getReq('/arbitrage/summary'),
+};
+
+// ============================================
+// 链上研究 API
+// ============================================
+
+export interface OnchainKpiTarget {
+  name: string;
+  tvlUsd?: number;
+  total24hUsd?: number;
+  category?: string;
+  chain?: string;
+}
+
+export interface OnchainSummary {
+  status: string;
+  asOf?: string;
+  source: {
+    provider: string;
+    authRequired: boolean;
+    endpoints: Record<string, string>;
+  };
+  sourceStatus: Record<string, string>;
+  kpis: {
+    totalTvlUsd: number;
+    totalStablecoinsUsd: number;
+    protocolCount: number;
+    chainCount: number;
+    fee24hUsd: number;
+    stableYieldPoolCount: number;
+    topChain?: OnchainKpiTarget | null;
+    topProtocol?: OnchainKpiTarget | null;
+    topFeeProtocol?: OnchainKpiTarget | null;
+  };
+  chains: Array<Record<string, unknown>>;
+  protocols: Array<Record<string, unknown>>;
+  fees: Array<Record<string, unknown>>;
+  stablecoins: Array<Record<string, unknown>>;
+  stablecoinChains: Array<Record<string, unknown>>;
+  yieldPools: Array<Record<string, unknown>>;
+  warnings: string[];
+  emptyReason?: string;
+}
+
+export const onchainApi = {
+  getSummary: (): Promise<OnchainSummary> =>
+    getReq('/onchain/summary'),
+};
+
+export interface WatchlistItem {
+  symbol: string;
+  sourceStrategyId: number;
+  sourceStrategyName: string;
+  lastSide?: string | null;
+  lastAction?: string | null;
+  lastPrice?: number | null;
+  lastQuantity?: number | null;
+  lastNotionalUsdt?: number | null;
+  lastExecutionAt?: string | null;
+  orderCount: number;
+}
+
+export interface WatchTradeMarker {
+  id: number;
+  label: 'B' | 'S';
+  side?: string | null;
+  action?: string | null;
+  symbol: string;
+  price?: number | null;
+  quantity?: number | null;
+  timestamp: number;
+  datetime?: string | null;
+  sourceStrategyId: number;
+  sourceStrategyName: string;
+  subscriptionId: number;
+  liveOrderId?: string | null;
+  clientOrderId?: string | null;
+}
+
+export interface WatchDerivativePoint {
+  timestamp: number;
+  value?: number | null;
+  [key: string]: number | string | null | undefined;
+}
+
+export interface WatchDerivativesData {
+  accountId: string;
+  exchange: string;
+  symbol: string;
+  timeframe: string;
+  openInterest: { points: WatchDerivativePoint[] | null };
+  fundingRate: { points: WatchDerivativePoint[] | null };
+  longShortRatio: { points: WatchDerivativePoint[] | null };
+  takerVolume: { points: WatchDerivativePoint[] | null };
+  basis: { points: WatchDerivativePoint[] | null };
+}
+
+export interface WatchMarketPayload {
+  accountId: string;
+  exchange: string;
+  symbol: string;
+  timeframe: string;
+  ticker: Ticker;
+  klines: Kline[];
+  orderbook: OrderBook;
+  recentTrades: Array<Record<string, unknown>>;
+  positions: LiveExecutionPosition[];
+}
+
+export const liveWatchApi = {
+  getWatchlist: (
+    accountId = 'default',
+    limit = 100
+  ): Promise<{ accountId: string; exchange: string; items: WatchlistItem[] }> =>
+    getReq('/live/watchlist', { params: { accountId, limit } }),
+
+  getWatchMarket: (
+    symbol: string,
+    accountId = 'default',
+    timeframe = '15m',
+    limit = 240
+  ): Promise<WatchMarketPayload> =>
+    getReq('/live/watchlist/market', { params: { accountId, symbol, timeframe, limit } }),
+
+  getTradeMarkers: (
+    symbol: string,
+    accountId = 'default',
+    params?: { start?: number; end?: number; limit?: number }
+  ): Promise<{ accountId: string; exchange: string; symbol: string; markers: WatchTradeMarker[] }> =>
+    getReq('/live/watchlist/markers', { params: { accountId, symbol, ...params } }),
+
+  getDerivativesData: (
+    symbol: string,
+    accountId = 'default',
+    timeframe = '15m',
+    limit = 120
+  ): Promise<WatchDerivativesData> =>
+    getReq('/live/watchlist/derivatives-data', { params: { accountId, symbol, timeframe, limit } }),
+};
+
+// ============================================
+// 行情 API
+// ============================================
+
+export const marketApi = {
+  getTicker: (exchange: string, symbol: string): Promise<Ticker> =>
+    getReq('/market/ticker', { params: { exchange, symbol } }),
+
+  getTickers: (exchange: string, symbols?: string[]): Promise<Ticker[]> =>
+    getReq('/market/tickers', {
+      params: { exchange, symbols: symbols?.join(','), offset: 0, limit: 500 },
+    }),
+
+  getKlines: (
+    exchange: string,
+    symbol: string,
+    timeframe = '1h',
+    limit = 100,
+    start?: number,
+    end?: number
+  ): Promise<Kline[]> =>
+    getReq('/market/klines', {
+      params: { exchange, symbol, timeframe, limit, start, end },
+    }),
+
+  getKlinesWithPrediction: (
+    exchange: string,
+    symbol: string,
+    timeframe = '1h',
+    limit = 100,
+    predictSteps = 30
+  ): Promise<{ klines: Kline[]; predictedBars: Kline[] }> =>
+    getReq('/market/klines', {
+      params: { exchange, symbol, timeframe, limit, predict: true, predictSteps },
+    }),
+
+  getTechnicalIndicators: (
+    exchange: string,
+    symbol: string,
+    timeframe = '1h',
+    limit = 100,
+    start?: number,
+    end?: number,
+    emaPeriods: number[] = [5, 10, 20, 30]
+  ): Promise<TechnicalIndicators> =>
+    getReq('/market/indicators', {
+      params: {
+        exchange,
+        symbol,
+        timeframe,
+        limit,
+        start,
+        end,
+        emaPeriods: emaPeriods.join(','),
+      },
+    }),
+
+  /** 真实 K 线 + 历史已落库预测 + 最新未来预测（复盘 / 双图对比） */
+  getPredictionsCompare: (
+    exchange: string,
+    symbol: string,
+    timeframe: string,
+    startTime: number,
+    endTime: number,
+    predictSteps = 30
+  ): Promise<{
+    klines: Kline[];
+    historicalPredictedBars: Kline[];
+    futurePredictedBars: Kline[];
+  }> =>
+    getReq('/market/predictions/compare', {
+      params: { exchange, symbol, timeframe, startTime, endTime, predictSteps },
+    }),
+
+  getOrderbook: (exchange: string, symbol: string, limit = 20): Promise<OrderBook> =>
+    getReq('/market/orderbook', { params: { exchange, symbol, limit } }),
+
+  getSymbols: (exchange: string, quote = 'USDT', marketType = 'spot'): Promise<{ symbols: string[] }> =>
+    getReq('/market/symbols', { params: { exchange, quote, market_type: marketType } }),
+};
+
+// ============================================
+// 资金费率 API
+// ============================================
+
+export const fundingApi = {
+  getRates: (exchange: string, symbols?: string[]): Promise<FundingRate[]> =>
+    getReq('/funding/rates', {
+      params: { exchange, symbols: symbols?.join(',') },
+    }),
+
+  getRate: (exchange: string, symbol: string): Promise<FundingRate> =>
+    getReq(`/funding/rate/${symbol}`, { params: { exchange } }),
+
+  getHistory: (
+    exchange: string,
+    symbol: string,
+    limit = 100
+  ): Promise<{ timestamp: number; rate: number }[]> =>
+    getReq('/funding/history', { params: { exchange, symbol, limit } }),
+
+  getOpportunities: (
+    exchange: string,
+    minRate = 0.0001,
+    limit = 20
+  ): Promise<FundingOpportunity[]> =>
+    getReq('/funding/opportunities', { params: { exchange, minRate, limit } }),
+
+  getSummary: (): Promise<{
+    exchanges: Record<string, { total: number; avgRate: number }>;
+    topOpportunities: FundingOpportunity[];
+  }> => getReq('/funding/summary'),
+};
+
+// ============================================
+// 交易 API
+// ============================================
+
+export const tradingApi = {
+  getBalance: (exchange: string): Promise<{ exchange: string; balance: any[] }> =>
+    getReq('/trading/balance', { params: { exchange } }),
+
+  getBalanceDetail: (exchange: string): Promise<{ exchange: string; trading: any[]; funding: any[] }> =>
+    getReq('/trading/balance/detail', { params: { exchange } }),
+
+  getOpenOrders: (exchange: string, symbol?: string): Promise<{ exchange: string; orders: any[] }> =>
+    getReq('/trading/orders/open', { params: { exchange, symbol } }),
+
+  getOrderHistory: (exchange: string, limit = 50, symbol?: string): Promise<{ exchange: string; orders: any[] }> =>
+    getReq('/trading/orders/history', { params: { exchange, limit, symbol } }),
+
+  cancelOrder: (orderId: string, exchange: string, symbol: string): Promise<{ result: any }> =>
+    deleteReq(`/trading/order/${orderId}`, { params: { exchange, symbol } }),
+
+  transfer: (data: {
+    exchange: string;
+    currency: string;
+    amount: number;
+    fromAccount: string;
+    toAccount: string;
+  }): Promise<any> =>
+    postReq('/trading/transfer', data),
+
+  spotOrder: (data: {
+    exchange: string;
+    symbol: string;
+    side: 'buy' | 'sell';
+    type: 'market' | 'limit';
+    amount: number;
+    price?: number | null;
+  }): Promise<{ order: any; warnings?: string[] }> =>
+    postReq('/trading/spot/order', data),
+
+  futuresOrder: (data: {
+    exchange: string;
+    symbol: string;
+    side: 'long' | 'short';
+    action: 'open' | 'close';
+    amount: number;
+    leverage: number;
+    price?: number | null;
+  }): Promise<{ order: any }> =>
+    postReq('/trading/futures/order', data),
+};
+
+// ============================================
+// 策略 API
+// ============================================
+
+export interface StrategyPageResponse {
+  items: Strategy[];
+  total: number;
+  page: number;
+  perPage: number;
+  pages: number;
+  statusCounts: Record<string, number>;
+  assetCounts: Record<string, number>;
+  typeCounts: Record<string, number>;
+  timeframeCounts: Record<string, number>;
+  capitalCounts: Record<string, number>;
+}
+
+export const strategyApi = {
+  getList: (): Promise<Strategy[]> => getReq('/strategies'),
+
+  getPage: (params: {
+    page: number;
+    perPage: number;
+    search?: string;
+    status?: string;
+    assetClass?: string;
+    strategyType?: string;
+    timeframe?: string;
+    capital?: string;
+  }): Promise<StrategyPageResponse> =>
+    getReq<StrategyPageResponse>('/strategies', {
+      params: {
+        page: params.page,
+        perPage: params.perPage,
+        search: params.search,
+        status: params.status,
+        assetClass: params.assetClass,
+        strategyType: params.strategyType,
+        timeframe: params.timeframe,
+        capital: params.capital,
+      },
+    }),
+
+  get: (id: number): Promise<Strategy> => getReq(`/strategies/${id}`),
+
+  create: (data: {
+    name: string;
+    description?: string;
+    scriptContent: string;
+    config?: Record<string, unknown>;
+    exchange?: string;
+    symbols?: string[];
+  }): Promise<Strategy> => postReq('/strategies', data),
+
+  update: (id: number, data: Partial<Strategy>): Promise<Strategy> =>
+    putReq(`/strategies/${id}`, data),
+
+  delete: (id: number): Promise<void> => deleteReq(`/strategies/${id}`),
+
+  start: (id: number): Promise<{ started: boolean }> => postReq(`/strategies/${id}/start`),
+
+  stop: (id: number): Promise<{ stopped: boolean }> => postReq(`/strategies/${id}/stop`),
+
+  getStatus: (id: number): Promise<{
+    strategyId: number;
+    name: string;
+    status: string;
+    pnl: number;
+    totalTrades: number;
+  }> => getReq(`/strategies/${id}/status`),
+};
+
+// ============================================
+// 监控 API
+// ============================================
+
+export const monitorApi = {
+  getAlerts: (): Promise<any[]> => getReq('/monitor/alerts'),
+
+  createAlert: (data: {
+    name: string;
+    type: string;
+    exchange: string;
+    symbol?: string;
+    threshold: number;
+    strategyId?: number;
+    cooldownSec?: number;
+    telegramBotToken?: string;
+    telegramChatId?: string;
+    webhookUrl?: string;
+  }): Promise<{ id: number }> => postReq('/monitor/alerts', data),
+
+  toggleAlert: (id: number, enabled: boolean): Promise<{ id: number; enabled: boolean }> =>
+    putReq(`/monitor/alerts/${id}`, null, { params: { enabled } }),
+
+  deleteAlert: (id: number): Promise<{ deleted: boolean }> =>
+    deleteReq(`/monitor/alerts/${id}`),
+
+  getRunningStrategies: (): Promise<any[]> =>
+    getReq('/monitor/running-strategies'),
+
+  getActiveStrategies: (): Promise<any[]> =>
+    getReq('/monitor/active_strategies'),
+
+  getLongShortRatio: (exchange: string, symbol: string): Promise<any> =>
+    getReq('/monitor/long-short-ratio', { params: { exchange, symbol } }),
+
+  getOpenInterest: (exchange: string, symbol: string): Promise<any> =>
+    getReq('/monitor/open-interest', { params: { exchange, symbol } }),
+};
+
+// ============================================
+// 策略上线 (自动交易 / 实盘) API
+// ============================================
+
+export const liveApi = {
+  getStrategies: (): Promise<any> => getReq('/strategies'),
+
+  startStrategy: (id: number): Promise<any> => postReq(`/strategies/${id}/start`),
+
+  stopStrategy: (id: number): Promise<any> => postReq(`/strategies/${id}/stop`),
+
+  getStrategyStatus: (id: number): Promise<any> => getReq(`/strategies/${id}/status`),
+
+  getStrategyTrades: (id: number, limit = 50): Promise<any> =>
+    getReq(`/strategies/${id}/trades`, { params: { limit } }),
+
+  configure: (config: {
+    [key: string]: unknown;
+    instance_id?: string | number;
+  }): Promise<any> => postReq('/live/configure', config),
+
+  start: (instanceId?: string | number): Promise<any> =>
+    postReq('/live/start', instanceId != null ? { instance_id: instanceId } : {}),
+
+  stop: (instanceId?: string | number, clearMetrics = false): Promise<any> =>
+    postReq('/live/stop', {
+      ...(instanceId != null ? { instance_id: instanceId } : {}),
+      clear_metrics: clearMetrics,
+    }),
+
+  pause: (instanceId?: string | number): Promise<any> =>
+    postReq('/live/pause', instanceId != null ? { instance_id: instanceId } : {}),
+
+  resume: (instanceId?: string | number): Promise<any> =>
+    postReq('/live/resume', instanceId != null ? { instance_id: instanceId } : {}),
+
+  closePaperPosition: (payload: {
+    instanceId?: string | number;
+    symbol: string;
+    side?: string | null;
+    marketType?: 'spot' | 'swap' | string | null;
+  }): Promise<any> => postReq('/live/positions/close', payload),
+
+  getDashboard: (instanceId?: string | number): Promise<any> =>
+    getReq('/live/dashboard', { params: instanceId != null ? { instance_id: instanceId } : {} }),
+
+  getEvents: (limit = 50, eventType?: string, instanceId?: string | number): Promise<any> =>
+    getReq('/live/events', {
+      params: {
+        limit,
+        eventType,
+        ...(instanceId != null ? { instance_id: instanceId } : {}),
+      },
+    }),
+
+  getEquityCurve: (instanceId?: string | number): Promise<any> =>
+    getReq('/live/equity_curve', { params: instanceId != null ? { instance_id: instanceId } : {} }),
+
+  preFlight: (config: {
+    [key: string]: unknown;
+  }): Promise<any> => postReq('/live/pre_flight', config),
+
+  promoteToLive: (config: {
+    sourceStrategyId: string | number;
+    exchange?: string;
+    initialEquity?: number;
+    loopInterval?: number;
+    startImmediately?: boolean;
+    confirmPaperReviewed?: boolean;
+    confirmLiveRisk?: boolean;
+    riskConfig?: Record<string, unknown>;
+  }): Promise<any> => postReq('/live/promote', config),
+
+  promoteToLivePreflight: (config: {
+    sourceStrategyId: string | number;
+    exchange?: string;
+    initialEquity?: number;
+    loopInterval?: number;
+    startImmediately?: boolean;
+    riskConfig?: Record<string, unknown>;
+  }): Promise<any> => postReq('/live/promote/preflight', config),
+
+  testTelegram: (message: string): Promise<any> =>
+    postReq('/live/test_telegram', { message }),
+};
+
+// ============================================
+// 模拟盘 API
+// ============================================
+
+export const paperApi = {
+  // 兼容旧“模拟盘验证”入口：底层改为复用回测 run_sync
+  run: async (config: {
+    [key: string]: unknown;
+  }): Promise<any> => {
+    const daysBack = Number(config.days_back || 30);
+    const end = new Date();
+    const start = new Date(end.getTime() - daysBack * 24 * 60 * 60 * 1000);
+    const toDate = (d: Date) => d.toISOString().slice(0, 10);
+
+    const payload: Record<string, unknown> = {
+      strategy_id: Number(config.strategy),
+      exchange: String(config.exchange || 'okx'),
+      timeframe: String(config.timeframe || '1h'),
+      start_date: toDate(start),
+      end_date: toDate(end),
+      initial_capital: Number(config.initial_capital || 10000),
+      stop_loss: Number(config.stop_loss || 0.05),
+    };
+    if (typeof config.symbol === 'string' && config.symbol.trim()) {
+      payload.symbol = config.symbol.trim();
+    }
+
+    // 与 backtestApi.runSync 一致，避免 Kairos 验证误判超时
+    return postReq('/backtest/run_sync', payload, { timeout: BACKTEST_RUN_SYNC_TIMEOUT_MS });
+  },
+
+  getInstances: (): Promise<any> => getReq('/paper-trading/instances'),
+
+  getInstance: (instanceId: string): Promise<any> => getReq(`/paper-trading/instances/${instanceId}`),
+
+  deleteInstance: (instanceId: string): Promise<any> => deleteReq(`/paper-trading/instances/${instanceId}`),
+
+  clearInstances: (): Promise<any> => deleteReq('/paper-trading/instances'),
+
+  getSignals: (instanceId?: string, strategy?: string, symbol?: string, timeframe?: string, limit?: number): Promise<any> =>
+    getReq('/paper-trading/signals', { params: { instanceId: instanceId, strategy, symbol, timeframe, limit } }),
+};
+
+// ============================================
+// 数据管理 API
+// ============================================
+
+export interface DataSyncMeta {
+  exchange: string;
+  symbol: string;
+  timeframe: string;
+  dataType: string;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+  totalRecords: number;
+  status: string | null;
+  lastSyncAt: string | null;
+  errorMessage: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DataSyncProgressItem {
+  exchange: string;
+  symbol: string;
+  timeframe: string;
+  status: string;
+  totalFetched: number;
+  totalInserted: number;
+  startedAt: string | null;
+  endedAt: string | null;
+  elapsedSeconds: number | null;
+  checkpointTimestamp?: number | null;
+  error: string | null;
+}
+
+export interface DataSyncStatusResponse {
+  isRunning: boolean;
+  currentJob: {
+    jobId?: string | null;
+    exchange: string | null;
+    status: string | null;
+    totalFetched: number;
+    totalInserted: number;
+    errors: number;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    elapsedSeconds?: number | null;
+    totalItems?: number;
+    completedItems?: number;
+    errorItems?: number;
+    processedItems?: number;
+    progress: DataSyncProgressItem[];
+  } | null;
+  summary: {
+    totalRecords: number;
+    exchanges: string[];
+    symbolsCount: number;
+    pairs: number;
+  };
+  details: DataSyncMeta[];
+}
+
+export interface DataSyncJobItem {
+  id?: number;
+  exchange?: string;
+  symbol: string;
+  timeframe: string;
+  status: string;
+  totalFetched: number;
+  totalInserted: number;
+  checkpointTimestamp?: number | null;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  elapsedSeconds?: number | null;
+  errorMessage?: string | null;
+}
+
+export interface DataSyncJobSummary {
+  jobId: string;
+  exchange: string;
+  status: string;
+  symbols: string[];
+  timeframes: string[];
+  historyDays: number;
+  startDate?: string | null;
+  endDate?: string | null;
+  totalSymbols: number;
+  totalTimeframes: number;
+  totalItems: number;
+  completedItems: number;
+  runningItems: number;
+  pendingItems: number;
+  errorItems: number;
+  processedItems?: number;
+  progressPercent: number;
+  totalFetched: number;
+  totalInserted: number;
+  errorCount: number;
+  errorMessage?: string | null;
+  createdAt?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  updatedAt?: string | null;
+  elapsedSeconds?: number | null;
+  items?: DataSyncJobItem[];
+}
+
+export interface DataSyncJobsResponse {
+  jobs: DataSyncJobSummary[];
+}
+
+export interface DataSyncConfigResponse {
+  defaultSymbols: string[];
+  defaultTimeframes: string[];
+  defaultHistoryDays: number;
+}
+
+export interface DataSyncScheduleConfig {
+  enabled: boolean;
+  intervalMinutes: number;
+  historyDays: number;
+  symbols: string[];
+  timeframes: string[];
+  lastRunAt?: string | null;
+  lastStartedAt?: string | null;
+  lastFinishedAt?: string | null;
+  lastJobId?: string | null;
+  lastError?: string | null;
+  nextRunAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface DataSyncScheduleUpdate {
+  enabled?: boolean;
+  intervalMinutes?: number;
+  historyDays?: number;
+  symbols?: string[];
+  timeframes?: string[];
+}
+
+export interface DataSyncTableStat {
+  tableName: string;
+  timeframe: string;
+  exchange: string;
+  symbol: string;
+  recordCount: number;
+  firstTimestamp: number | null;
+  lastTimestamp: number | null;
+}
+
+export interface DataSyncMarketStats {
+  totalRecords: number;
+  totalPairs: number;
+  totalSymbols: number;
+}
+
+export interface DataSyncTableStatsResponse {
+  tables: DataSyncTableStat[];
+  totalRecords: number;
+  totalPairs: number;
+  marketStats: {
+    swap: DataSyncMarketStats;
+    spot: DataSyncMarketStats;
+  };
+}
+
+export interface DataSyncStartRequest {
+  exchange?: string;
+  symbols?: string[];
+  timeframes?: string[];
+  historyDays?: number;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface DataSyncStartResponse {
+  jobId?: string;
+  message?: string;
+  exchange?: string;
+  symbols?: string[];
+  timeframes?: string[];
+  historyDays?: number;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface DataSyncSyncOneRequest {
+  exchange?: string;
+  symbol: string;
+  timeframe: string;
+  startDate?: string;
+  endDate?: string;
+  historyDays?: number;
+}
+
+export interface DataSyncSyncOneResponse {
+  exchange: string;
+  symbol: string;
+  timeframe: string;
+  status: string;
+  totalFetched: number;
+  totalInserted: number;
+  error?: string | null;
+  elapsedSeconds?: number | null;
+}
+
+export interface DataSyncDeleteRequest {
+  exchange?: string;
+  symbol?: string;
+  timeframe?: string;
+}
+
+export interface DataSyncDeleteResponse {
+  message: string;
+  deleted: number;
+}
+
+export interface DataSyncAddSymbolRequest {
+  symbol: string;
+}
+
+export interface DataSyncAddSymbolResponse {
+  symbol: string;
+  added: boolean;
+  defaultSymbols: string[];
+}
+
+export interface DataSyncRemoveSymbolRequest {
+  symbol: string;
+}
+
+export interface DataSyncRemoveSymbolResponse {
+  symbol: string;
+  removed: boolean;
+  defaultSymbols: string[];
+}
+
+// ============================================
+// AI 预测 API
+// ============================================
+
+export const aiPredictApi = {
+  analyze: (data: {
+    exchange?: string;
+    symbol: string;
+    timeframe: string;
+    lookback?: number;
+  }): Promise<{
+    symbol: string;
+    timeframe: string;
+    analysis: string;
+    predictedBars: any[];
+  }> => postReq('/ai_predict/analyze', data),
+};
+
+// ============================================
+// 数据资产 API
+// ============================================
+
+export const dataAssetsApi = {
+  getAssets: (): Promise<{
+    assets: Array<{
+      exchange: string;
+      symbol: string;
+      timeframe: string;
+      recordCount: number;
+      firstDate: string | null;
+      lastDate: string | null;
+    }>;
+    totalRecords: number;
+    totalPairs: number;
+    totalItems: number;
+  }> => getReq('/data_sync/assets'),
+
+  quickSync: (data: {
+    exchange?: string;
+    symbol: string;
+    timeframe: string;
+    historyDays?: number;
+  }): Promise<{ taskId: string; message: string }> =>
+    postReq('/data_sync/sync', data),
+};
+
+// ============================================
+// 数据同步 API
+// ============================================
+
+export const dataSyncApi = {
+  getStatus: (): Promise<DataSyncStatusResponse> => getReq('/sync/status'),
+
+  getJobs: (limit = 20): Promise<DataSyncJobsResponse> =>
+    getReq('/sync/jobs', { params: { limit, includeItems: false } }),
+
+  getConfig: (): Promise<DataSyncConfigResponse> => getReq('/sync/config'),
+
+  getSchedule: (): Promise<DataSyncScheduleConfig> => getReq('/sync/schedule'),
+
+  updateSchedule: (data: DataSyncScheduleUpdate): Promise<DataSyncScheduleConfig> =>
+    putReq('/sync/schedule', data),
+
+  addSymbol: (data: DataSyncAddSymbolRequest): Promise<DataSyncAddSymbolResponse> =>
+    postReq('/sync/symbols', data),
+
+  removeSymbol: (data: DataSyncRemoveSymbolRequest): Promise<DataSyncRemoveSymbolResponse> =>
+    deleteReq('/sync/symbols', { data }),
+
+  getData: (exchange?: string): Promise<Array<Record<string, unknown>>> =>
+    getReq('/sync/data', { params: { exchange } }),
+
+  getTableStats: (): Promise<DataSyncTableStatsResponse> => getReq('/sync/table-stats'),
+
+  startSync: (data: DataSyncStartRequest): Promise<DataSyncStartResponse> =>
+    postReq('/sync/start', data, { timeout: DATA_SYNC_LONG_TIMEOUT_MS }),
+
+  syncOne: (data: DataSyncSyncOneRequest): Promise<DataSyncSyncOneResponse> =>
+    postReq('/sync/sync-one', data, { timeout: DATA_SYNC_LONG_TIMEOUT_MS }),
+
+  dailyUpdate: (exchange?: string, data?: DataSyncStartRequest): Promise<DataSyncStartResponse> =>
+    postReq('/sync/daily-update', data || {}, {
+      params: { exchange },
+      timeout: DATA_SYNC_LONG_TIMEOUT_MS,
+    }),
+
+  deleteData: (data: DataSyncDeleteRequest): Promise<DataSyncDeleteResponse> =>
+    postReq('/sync/delete-data', data),
+};
+
+// ============================================
+// 系统设置 API
+// ============================================
+
+export interface LLMModelSettings {
+  model: string;
+  defaultModel: string;
+  models: string[];
+  freeTierModels?: string[];
+  modelFallbackEnabled?: boolean;
+  baseUrl: string;
+  enableThinking?: boolean;
+  requestTimeout?: number;
+  apiKeyConfigured: boolean;
+  apiKeySource?: string | null;
+}
+
+export const settingsApi = {
+  getNotify: (): Promise<{ enabled: boolean; webhookConfigured: boolean }> =>
+    getReq('/settings/notify'),
+  setNotify: (enabled: boolean): Promise<{ enabled: boolean; webhookConfigured: boolean }> =>
+    postReq('/settings/notify', { enabled }),
+  getFeishuWebhook: (): Promise<{ webhookConfigured: boolean; maskedWebhookUrl?: string | null }> =>
+    getReq('/settings/feishu-webhook'),
+  setFeishuWebhook: (webhookUrl: string): Promise<{ webhookConfigured: boolean; maskedWebhookUrl?: string | null }> =>
+    postReq('/settings/feishu-webhook', { webhookUrl }),
+  getLLMModel: (): Promise<LLMModelSettings> =>
+    getReq('/settings/llm-model'),
+  setLLMModel: (model: string): Promise<LLMModelSettings> =>
+    putReq('/settings/llm-model', { model }),
+  addLLMModel: (model: string): Promise<LLMModelSettings> =>
+    postReq('/settings/llm-models', { model }),
+  testLLMModel: (): Promise<{ ok: boolean; model: string; baseUrl: string; reply: string }> =>
+    postReq('/settings/llm-model/test'),
+  getStrategyProfitPush: (): Promise<{
+    enabled: boolean;
+    intervalMinutes: number;
+    running: boolean;
+    lastStartedAt?: string | null;
+    lastSentAt?: string | null;
+    lastFinishedAt?: string | null;
+    lastError?: string | null;
+    lastSkipReason?: string | null;
+    notifyReady: boolean;
+    notifyEnabled: boolean;
+    webhookConfigured: boolean;
+    profitReportImageReady?: boolean;
+    profitReportImageConfigured?: boolean;
+    profitReportImageCjkFontAvailable?: boolean;
+    profitReportImageReason?: string | null;
+    lastDeliveryType?: string | null;
+    lastDeliveryError?: string | null;
+  }> => getReq('/settings/strategy-profit-push'),
+  setStrategyProfitPush: (data: {
+    enabled?: boolean;
+    intervalMinutes?: number;
+  }): Promise<{
+    enabled: boolean;
+    intervalMinutes: number;
+    running: boolean;
+    lastStartedAt?: string | null;
+    lastSentAt?: string | null;
+    lastFinishedAt?: string | null;
+    lastError?: string | null;
+    lastSkipReason?: string | null;
+    notifyReady: boolean;
+    notifyEnabled: boolean;
+    webhookConfigured: boolean;
+    profitReportImageReady?: boolean;
+    profitReportImageConfigured?: boolean;
+    profitReportImageCjkFontAvailable?: boolean;
+    profitReportImageReason?: string | null;
+    lastDeliveryType?: string | null;
+    lastDeliveryError?: string | null;
+  }> => postReq('/settings/strategy-profit-push', data),
+  sendStrategyProfitPushNow: (): Promise<{
+    enabled: boolean;
+    intervalMinutes: number;
+    running: boolean;
+    lastSentAt?: string | null;
+    lastError?: string | null;
+    lastSkipReason?: string | null;
+    result?: Record<string, unknown>;
+    notifyReady: boolean;
+    notifyEnabled: boolean;
+    webhookConfigured: boolean;
+    profitReportImageReady?: boolean;
+    profitReportImageConfigured?: boolean;
+    profitReportImageCjkFontAvailable?: boolean;
+    profitReportImageReason?: string | null;
+    lastDeliveryType?: string | null;
+    lastDeliveryError?: string | null;
+  }> => postReq('/settings/strategy-profit-push/test'),
+  getLiveProfitPush: (): Promise<{
+    enabled: boolean;
+    intervalMinutes: number;
+    running: boolean;
+    lastStartedAt?: string | null;
+    lastSentAt?: string | null;
+    lastFinishedAt?: string | null;
+    lastError?: string | null;
+    lastSkipReason?: string | null;
+    notifyReady: boolean;
+    notifyEnabled: boolean;
+    webhookConfigured: boolean;
+    profitReportImageReady?: boolean;
+    profitReportImageConfigured?: boolean;
+    profitReportImageCjkFontAvailable?: boolean;
+    profitReportImageReason?: string | null;
+    lastDeliveryType?: string | null;
+    lastDeliveryError?: string | null;
+  }> => getReq('/settings/live-profit-push'),
+  setLiveProfitPush: (data: {
+    enabled?: boolean;
+    intervalMinutes?: number;
+  }): Promise<{
+    enabled: boolean;
+    intervalMinutes: number;
+    running: boolean;
+    lastStartedAt?: string | null;
+    lastSentAt?: string | null;
+    lastFinishedAt?: string | null;
+    lastError?: string | null;
+    lastSkipReason?: string | null;
+    notifyReady: boolean;
+    notifyEnabled: boolean;
+    webhookConfigured: boolean;
+    profitReportImageReady?: boolean;
+    profitReportImageConfigured?: boolean;
+    profitReportImageCjkFontAvailable?: boolean;
+    profitReportImageReason?: string | null;
+    lastDeliveryType?: string | null;
+    lastDeliveryError?: string | null;
+  }> => postReq('/settings/live-profit-push', data),
+  sendLiveProfitPushNow: (): Promise<{
+    enabled: boolean;
+    intervalMinutes: number;
+    running: boolean;
+    lastSentAt?: string | null;
+    lastError?: string | null;
+    lastSkipReason?: string | null;
+    result?: Record<string, unknown>;
+    notifyReady: boolean;
+    notifyEnabled: boolean;
+    webhookConfigured: boolean;
+    profitReportImageReady?: boolean;
+    profitReportImageConfigured?: boolean;
+    profitReportImageCjkFontAvailable?: boolean;
+    profitReportImageReason?: string | null;
+    lastDeliveryType?: string | null;
+    lastDeliveryError?: string | null;
+  }> => postReq('/settings/live-profit-push/test'),
+};
+
+// ============================================
+// 健康检查 API
+// ============================================
+
+export const healthApi = {
+  check: (): Promise<{ status: string }> => getReq('/system/health'),
+  checkExchanges: (): Promise<{ exchanges: Record<string, string> }> =>
+    getReq('/system/exchanges'),
+};
+
+// ============================================
+// AI Agent API
+// ============================================
+
+export const agentApi = {
+  createTask: (data: {
+    [key: string]: unknown;
+  }): Promise<{ taskId: string; status: string; message: string }> =>
+    postReq('/agent/tasks', data),
+
+  listTasks: (): Promise<any[]> => getReq('/agent/tasks'),
+
+  getTask: (taskId: string): Promise<any> => getReq(`/agent/tasks/${taskId}`),
+
+  getIterations: (taskId: string): Promise<any[]> =>
+    getReq(`/agent/tasks/${taskId}/iterations`),
+
+  stopTask: (taskId: string): Promise<any> =>
+    postReq(`/agent/tasks/${taskId}/stop`),
+
+  acceptBest: (taskId: string): Promise<any> =>
+    postReq(`/agent/tasks/${taskId}/accept`),
+
+  generateStrategy: (data: {
+    prompt: string;
+    symbol?: string;
+    timeframe?: string;
+  }): Promise<{
+    strategyId: number;
+    className: string;
+    fileName: string;
+    description: string;
+    modulePath: string;
+    message: string;
+  }> => postReq('/agent/generate_strategy', data),
+};
+
+// ============================================
+// 回测 API
+// ============================================
+
+export const backtestApi = {
+  runSync: (data: Record<string, unknown>): Promise<any> =>
+    postReq('/backtest/run_sync', data, { timeout: BACKTEST_RUN_SYNC_TIMEOUT_MS }),
+
+  /** 异步回测：立即返回 jobId，进度见 getJob（SQLite 持久化，刷新页面或服务重启后可继续轮询） */
+  runJob: (data: Record<string, unknown>): Promise<{ jobId: string }> =>
+    postReq('/backtest/run_job', data),
+
+  getJob: (
+    jobId: string,
+  ): Promise<{
+    jobId: string;
+    strategyId: number;
+    status: string;
+    currentBar: number;
+    totalBars: number;
+    percent: number | null;
+    message?: string | null;
+    result?: any;
+    errorMessage?: string | null;
+    updatedAt?: string | null;
+    resumable?: boolean;
+  }> => getReq(`/backtest/job/${jobId}`),
+
+  cancelJob: (
+    jobId: string,
+  ): Promise<{
+    jobId: string;
+    strategyId: number;
+    status: string;
+    currentBar: number;
+    totalBars: number;
+    percent: number | null;
+    message?: string | null;
+    result?: any;
+    errorMessage?: string | null;
+    updatedAt?: string | null;
+    resumable?: boolean;
+  }> => postReq(`/backtest/job/${jobId}/cancel`),
+
+  resumeJob: (
+    jobId: string,
+  ): Promise<{
+    jobId: string;
+    strategyId: number;
+    status: string;
+    currentBar: number;
+    totalBars: number;
+    percent: number | null;
+    message?: string | null;
+    result?: any;
+    errorMessage?: string | null;
+    updatedAt?: string | null;
+    resumable?: boolean;
+  }> => postReq(`/backtest/job/${jobId}/resume`),
+
+  getJobs: (
+    params?: { strategyId?: number | null; status?: string; limit?: number; includeResult?: boolean },
+  ): Promise<Array<{
+    jobId: string;
+    strategyId: number;
+    status: string;
+    currentBar: number;
+    totalBars: number;
+    percent: number | null;
+    request?: Record<string, unknown> | null;
+    message?: string | null;
+    result?: any;
+    errorMessage?: string | null;
+    updatedAt?: string | null;
+    resumable?: boolean;
+  }>> => getReq('/backtest/jobs', {
+    params: {
+      strategyId: params?.strategyId ?? undefined,
+      status: params?.status,
+      limit: params?.limit ?? 50,
+      include_result: params?.includeResult ?? undefined,
+    },
+  }),
+
+  getResults: (
+    params?: {
+      strategyId?: number | null;
+      query?: string;
+      limit?: number;
+      offset?: number;
+      sortBy?: 'created' | 'return' | 'drawdown' | 'win_rate';
+      sortDir?: 'asc' | 'desc';
+      includeMatrixSummary?: boolean;
+    },
+  ): Promise<any[]> =>
+    getReq('/backtest/results', {
+      params: {
+        strategyId: params?.strategyId ?? undefined,
+        q: params?.query || undefined,
+        limit: params?.limit ?? 20,
+        offset: params?.offset ?? undefined,
+        sort_by: params?.sortBy,
+        sort_dir: params?.sortDir,
+        include_matrix_summary: params?.includeMatrixSummary ?? undefined,
+      },
+    }),
+
+  getResult: (id: number): Promise<any> =>
+    getReq(`/backtest/result/${id}`),
+
+  deleteResult: (id: number): Promise<{ deleted: boolean; id: number }> =>
+    deleteReq(`/backtest/result/${id}`),
+
+  getStrategies: (): Promise<Record<string, unknown>> =>
+    getReq('/backtest/strategies'),
+};
+
+export default api;

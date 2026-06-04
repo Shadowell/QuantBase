@@ -1,0 +1,195 @@
+"""HTTP client used by the local QuantBase MCP server."""
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from app.mcp.schemas import DEFAULT_API_BASE
+
+
+SENSITIVE_KEY_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "secret",
+    "passphrase",
+    "password",
+    "token",
+    "webhook",
+    "authorization",
+    "auth",
+)
+
+
+class QuantBaseMcpError(RuntimeError):
+    """Raised when QuantBase's API returns an HTTP or application error."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, payload: Any = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload
+
+
+def _redact(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(fragment in lowered for fragment in SENSITIVE_KEY_FRAGMENTS):
+                out[key] = "***"
+            else:
+                out[key] = _redact(item)
+        return out
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
+
+
+class QuantBaseMcpClient:
+    """Small API client that unwraps QuantBase envelopes and writes MCP audit lines."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str | None = None,
+        audit_path: str | Path | None = None,
+        timeout: float = 30.0,
+        http_client: Any | None = None,
+    ) -> None:
+        self.base_url = (base_url or os.getenv("QUANTBASE_MCP_API_BASE") or DEFAULT_API_BASE).rstrip("/")
+        self.audit_path = Path(
+            audit_path
+            or os.getenv("QUANTBASE_MCP_AUDIT_PATH")
+            or "data/mcp_tool_audit.jsonl"
+        )
+        self.timeout = float(timeout)
+        self.http_client = http_client or httpx.Client(timeout=self.timeout)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        tool_name: str,
+        audit_context: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        url = f"{self.base_url}{normalized_path}"
+        started_at = datetime.now(timezone.utc)
+        status_code: int | None = None
+        try:
+            response = self.http_client.request(
+                method.upper(),
+                url,
+                params=params,
+                json=json,
+                timeout=timeout or self.timeout,
+            )
+            status_code = int(response.status_code)
+            payload = self._response_payload(response)
+            if status_code >= 400 or (isinstance(payload, dict) and payload.get("success") is False):
+                message = self._error_message(payload, status_code)
+                self._audit(
+                    tool_name,
+                    method,
+                    normalized_path,
+                    params,
+                    json,
+                    audit_context,
+                    "error",
+                    status_code,
+                    started_at,
+                    error=message,
+                )
+                raise QuantBaseMcpError(message, status_code=status_code, payload=payload)
+
+            result = payload.get("data") if isinstance(payload, dict) and payload.get("success") is True and "data" in payload else payload
+            self._audit(
+                tool_name,
+                method,
+                normalized_path,
+                params,
+                json,
+                audit_context,
+                "success",
+                status_code,
+                started_at,
+            )
+            return result
+        except QuantBaseMcpError:
+            raise
+        except Exception as exc:
+            message = str(exc)
+            self._audit(
+                tool_name,
+                method,
+                normalized_path,
+                params,
+                json,
+                audit_context,
+                "error",
+                status_code,
+                started_at,
+                error=message,
+            )
+            raise QuantBaseMcpError(message, status_code=status_code) from exc
+
+    @staticmethod
+    def _response_payload(response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except Exception:
+            text = getattr(response, "text", "")
+            return {"success": False, "error": {"message": text or f"HTTP {response.status_code}"}}
+
+    @staticmethod
+    def _error_message(payload: Any, status_code: int) -> str:
+        if isinstance(payload, dict):
+            detail = payload.get("detail")
+            error = payload.get("error")
+            if isinstance(error, dict):
+                return str(error.get("message") or error.get("detail") or detail or f"HTTP {status_code}")
+            return str(detail or error or payload.get("message") or f"HTTP {status_code}")
+        return f"HTTP {status_code}: {payload}"
+
+    def _audit(
+        self,
+        tool_name: str,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None,
+        payload: dict[str, Any] | None,
+        audit_context: dict[str, Any] | None,
+        status: str,
+        http_status: int | None,
+        started_at: datetime,
+        *,
+        error: str | None = None,
+    ) -> None:
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "started_at": started_at.isoformat(),
+            "tool": tool_name,
+            "method": method.upper(),
+            "path": path,
+            "status": status,
+            "http_status": http_status,
+            "request": _redact({"params": params or {}, "json": payload or {}}),
+            "context": _redact(audit_context or {}),
+        }
+        if error:
+            entry["error"] = error[:1000]
+        try:
+            self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.audit_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception:
+            # MCP tool execution should not fail just because audit storage is temporarily unavailable.
+            return

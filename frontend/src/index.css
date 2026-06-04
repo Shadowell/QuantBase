@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color: #e6edf3;
+  background-color: #0d1117;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  /* 涨跌颜色 — 通过 CSS 变量动态切换，由 useSettingsStore 注入 */
+  --color-up: #FF1744;
+  --color-down: #00C853;
+  --color-up-bg: #FF17441A;
+  --color-down-bg: #00C8531A;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #161b22;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+
+/* 涨跌颜色工具类 */
+.text-up {
+  color: var(--color-up);
+}
+
+.text-down {
+  color: var(--color-down);
+}
+
+.bg-up {
+  background-color: var(--color-up-bg);
+}
+
+.bg-down {
+  background-color: var(--color-down-bg);
+}
+
+.crypto-select-native {
+  color-scheme: dark;
+  background-color: #0b1220;
+}
+
+.crypto-select-native option,
+.crypto-select-native optgroup {
+  background: #111827;
+  color: #e6edf3;
+}
+
+.crypto-select-native option:checked,
+.crypto-select-native option:hover,
+.crypto-select-native option:focus {
+  background: #1d4ed8;
+  color: #ffffff;
+}
